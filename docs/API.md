@@ -16,6 +16,10 @@ API runtime is configured in `[server.api]`.
 | `request_body_limit_bytes` | `usize` | `65536` | Maximum request body size. Must be `> 0`. |
 | `minimal_runtime_enabled` | `bool` | `false` | Enables runtime snapshot endpoints requiring ME pool read-lock aggregation. |
 | `minimal_runtime_cache_ttl_ms` | `u64` | `1000` | Cache TTL for minimal snapshots. `0` disables cache; valid range is `[0, 60000]`. |
+| `runtime_edge_enabled` | `bool` | `false` | Enables runtime edge endpoints with cached aggregation payloads. |
+| `runtime_edge_cache_ttl_ms` | `u64` | `1000` | Cache TTL for runtime edge summary payloads. `0` disables cache. |
+| `runtime_edge_top_n` | `usize` | `10` | Top-N rows for runtime edge leaderboard payloads. |
+| `runtime_edge_events_capacity` | `usize` | `256` | Ring-buffer size for `/v1/runtime/events/recent`. |
 | `read_only` | `bool` | `false` | Disables mutating endpoints. |
 
 `server.admin_api` is accepted as an alias for backward compatibility.
@@ -24,6 +28,9 @@ Runtime validation for API config:
 - `server.api.listen` must be a valid `IP:PORT`.
 - `server.api.request_body_limit_bytes` must be `> 0`.
 - `server.api.minimal_runtime_cache_ttl_ms` must be within `[0, 60000]`.
+- `server.api.runtime_edge_cache_ttl_ms` must be within `[0, 60000]`.
+- `server.api.runtime_edge_top_n` must be within `[1, 1000]`.
+- `server.api.runtime_edge_events_capacity` must be within `[16, 4096]`.
 
 ## Protocol Contract
 
@@ -80,12 +87,19 @@ Notes:
 | `GET` | `/v1/runtime/gates` | none | `200` | `RuntimeGatesData` |
 | `GET` | `/v1/limits/effective` | none | `200` | `EffectiveLimitsData` |
 | `GET` | `/v1/security/posture` | none | `200` | `SecurityPostureData` |
+| `GET` | `/v1/security/whitelist` | none | `200` | `SecurityWhitelistData` |
 | `GET` | `/v1/stats/summary` | none | `200` | `SummaryData` |
 | `GET` | `/v1/stats/zero/all` | none | `200` | `ZeroAllData` |
 | `GET` | `/v1/stats/upstreams` | none | `200` | `UpstreamsData` |
 | `GET` | `/v1/stats/minimal/all` | none | `200` | `MinimalAllData` |
 | `GET` | `/v1/stats/me-writers` | none | `200` | `MeWritersData` |
 | `GET` | `/v1/stats/dcs` | none | `200` | `DcStatusData` |
+| `GET` | `/v1/runtime/me_pool_state` | none | `200` | `RuntimeMePoolStateData` |
+| `GET` | `/v1/runtime/me_quality` | none | `200` | `RuntimeMeQualityData` |
+| `GET` | `/v1/runtime/upstream_quality` | none | `200` | `RuntimeUpstreamQualityData` |
+| `GET` | `/v1/runtime/nat_stun` | none | `200` | `RuntimeNatStunData` |
+| `GET` | `/v1/runtime/connections/summary` | none | `200` | `RuntimeEdgeConnectionsSummaryData` |
+| `GET` | `/v1/runtime/events/recent` | none | `200` | `RuntimeEdgeEventsData` |
 | `GET` | `/v1/stats/users` | none | `200` | `UserInfo[]` |
 | `GET` | `/v1/users` | none | `200` | `UserInfo[]` |
 | `POST` | `/v1/users` | `CreateUserRequest` | `201` | `CreateUserResponse` |
@@ -267,6 +281,25 @@ Note: the request contract is defined, but the corresponding route currently ret
 | `telemetry_core_enabled` | `bool` | Core telemetry toggle. |
 | `telemetry_user_enabled` | `bool` | Per-user telemetry toggle. |
 | `telemetry_me_level` | `string` | ME telemetry level (`silent`, `normal`, `debug`). |
+
+### `SecurityWhitelistData`
+| Field | Type | Description |
+| --- | --- | --- |
+| `generated_at_epoch_secs` | `u64` | Snapshot generation timestamp. |
+| `enabled` | `bool` | `true` when whitelist has at least one CIDR entry. |
+| `entries_total` | `usize` | Number of whitelist CIDR entries. |
+| `entries` | `string[]` | Whitelist CIDR entries as strings. |
+
+### Runtime Min Endpoints
+- `/v1/runtime/me_pool_state`: generations, hardswap state, writer contour/health counts, refill inflight snapshot.
+- `/v1/runtime/me_quality`: ME error/drift/reconnect counters and per-DC RTT coverage snapshot.
+- `/v1/runtime/upstream_quality`: upstream runtime policy, connect counters, health summary and per-upstream DC latency/IP preference.
+- `/v1/runtime/nat_stun`: NAT/STUN runtime flags, server lists, reflection cache state and backoff remaining.
+
+### Runtime Edge Endpoints
+- `/v1/runtime/connections/summary`: cached connection totals (`total/me/direct`), active users and top-N users by connections/traffic.
+- `/v1/runtime/events/recent?limit=N`: bounded control-plane ring-buffer events (`limit` clamped to `[1, 1000]`).
+- If `server.api.runtime_edge_enabled=false`, runtime edge endpoints return `enabled=false` with `reason=feature_disabled`.
 
 ### `ZeroAllData`
 | Field | Type | Description |
