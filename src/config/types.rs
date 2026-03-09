@@ -1044,7 +1044,7 @@ impl Default for LinksConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ApiConfig {
     /// Enable or disable REST API.
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub enabled: bool,
 
     /// Listen address for API in `IP:PORT` format.
@@ -1096,7 +1096,7 @@ pub struct ApiConfig {
 impl Default for ApiConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: default_true(),
             listen: default_api_listen(),
             whitelist: default_api_whitelist(),
             auth_header: String::new(),
