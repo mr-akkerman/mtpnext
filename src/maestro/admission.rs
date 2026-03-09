@@ -22,9 +22,9 @@ pub(crate) async fn configure_admission_gate(
             admission_tx.send_replace(initial_ready);
             let _ = route_runtime.set_mode(RelayRouteMode::Middle);
             if initial_ready {
-                info!("Conditional-admission gate: open (ME pool ready)");
+                info!("Conditional-admission gate: open / ME pool READY");
             } else {
-                warn!("Conditional-admission gate: closed (ME pool is not ready)");
+                warn!("Conditional-admission gate: closed / ME pool is NOT ready)");
             }
 
             let pool_for_gate = pool.clone();
@@ -96,10 +96,10 @@ pub(crate) async fn configure_admission_gate(
                             if next_fallback_active {
                                 warn!("Conditional-admission gate opened in ME fallback mode");
                             } else {
-                                info!("Conditional-admission gate opened (ME pool ready)");
+                                info!("Conditional-admission gate opened / ME pool READY");
                             }
                         } else {
-                            warn!("Conditional-admission gate closed (ME pool is not ready)");
+                            warn!("Conditional-admission gate closed / ME pool is NOT ready");
                         }
                     }
                 }
@@ -107,7 +107,7 @@ pub(crate) async fn configure_admission_gate(
         } else {
             admission_tx.send_replace(false);
             let _ = route_runtime.set_mode(RelayRouteMode::Direct);
-            warn!("Conditional-admission gate: closed (ME pool is unavailable)");
+            warn!("Conditional-admission gate: closed / ME pool is UNAVAILABLE");
         }
     } else {
         admission_tx.send_replace(true);
