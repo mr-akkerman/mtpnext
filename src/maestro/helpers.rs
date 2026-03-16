@@ -1,4 +1,5 @@
 use std::time::Duration;
+use std::path::PathBuf;
 
 use tokio::sync::watch;
 use tracing::{debug, error, info, warn};
@@ -9,8 +10,9 @@ use crate::transport::middle_proxy::{
     ProxyConfigData, fetch_proxy_config_with_raw, load_proxy_config_cache, save_proxy_config_cache,
 };
 
-pub(crate) fn parse_cli() -> (String, bool, Option<String>) {
+pub(crate) fn parse_cli() -> (String, Option<PathBuf>, bool, Option<String>) {
     let mut config_path = "config.toml".to_string();
+    let mut data_path: Option<PathBuf> = None;
     let mut silent = false;
     let mut log_level: Option<String> = None;
 
@@ -28,6 +30,18 @@ pub(crate) fn parse_cli() -> (String, bool, Option<String>) {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
+            "--data-path" => {
+                i += 1;
+                if i < args.len() {
+                    data_path = Some(PathBuf::from(args[i].clone()));
+                } else {
+                    eprintln!("Missing value for --data-path");
+                    std::process::exit(0);
+                }
+            }
+            s if s.starts_with("--data-path=") => {
+                data_path = Some(PathBuf::from(s.trim_start_matches("--data-path=").to_string()));
+            }
             "--silent" | "-s" => {
                 silent = true;
             }
@@ -44,6 +58,7 @@ pub(crate) fn parse_cli() -> (String, bool, Option<String>) {
                 eprintln!("Usage: telemt [config.toml] [OPTIONS]");
                 eprintln!();
                 eprintln!("Options:");
+                eprintln!("  --data-path <DIR>       Set data directory (absolute path; overrides config value)");
                 eprintln!("  --silent, -s            Suppress info logs");
                 eprintln!("  --log-level <LEVEL>     debug|verbose|normal|silent");
                 eprintln!("  --help, -h              Show this help");
@@ -78,7 +93,7 @@ pub(crate) fn parse_cli() -> (String, bool, Option<String>) {
         i += 1;
     }
 
-    (config_path, silent, log_level)
+    (config_path, data_path, silent, log_level)
 }
 
 pub(crate) fn print_proxy_links(host: &str, port: u16, config: &ProxyConfig) {

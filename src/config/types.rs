@@ -3,6 +3,7 @@ use ipnetwork::IpNetwork;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::IpAddr;
+use std::path::PathBuf;
 
 use super::defaults::*;
 
@@ -356,6 +357,9 @@ impl Default for NetworkConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GeneralConfig {
+    #[serde(default)]
+    pub data_path: Option<PathBuf>,
+
     #[serde(default)]
     pub modes: ProxyModes,
 
@@ -871,6 +875,7 @@ pub struct GeneralConfig {
 impl Default for GeneralConfig {
     fn default() -> Self {
         Self {
+            data_path: None,
             modes: ProxyModes::default(),
             prefer_ipv6: false,
             fast_mode: default_true(),
