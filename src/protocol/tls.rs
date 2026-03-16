@@ -29,6 +29,8 @@ pub const TLS_DIGEST_HALF_LEN: usize = 16;
 /// Time skew limits for anti-replay (in seconds)
 pub const TIME_SKEW_MIN: i64 = -20 * 60; // 20 minutes before
 pub const TIME_SKEW_MAX: i64 = 10 * 60;  // 10 minutes after
+/// Maximum accepted boot-time timestamp (seconds) before skew checks are enforced.
+pub const BOOT_TIME_MAX_SECS: u32 = 7 * 24 * 60 * 60;
 
 // ============= Private Constants =============
 
@@ -364,7 +366,7 @@ fn validate_tls_handshake_at_time(
         if !ignore_time_skew {
             // Allow very small timestamps (boot time instead of unix time)
             // This is a quirk in some clients that use uptime instead of real time
-            let is_boot_time = timestamp < 60 * 60 * 24 * 1000; // < ~2.7 years in seconds
+            let is_boot_time = timestamp < BOOT_TIME_MAX_SECS;
             if !is_boot_time {
                 let time_diff = now - i64::from(timestamp);
                 if !(TIME_SKEW_MIN..=TIME_SKEW_MAX).contains(&time_diff) {
@@ -563,7 +565,9 @@ pub fn extract_sni_from_client_hello(handshake: &[u8]) -> Option<String> {
                 if name_type == 0 && name_len > 0
                     && let Ok(host) = std::str::from_utf8(&handshake[sn_pos..sn_pos + name_len])
                 {
-                    return Some(host.to_string());
+                    if is_valid_sni_hostname(host) {
+                        return Some(host.to_string());
+                    }
                 }
                 sn_pos += name_len;
             }
@@ -572,6 +576,35 @@ pub fn extract_sni_from_client_hello(handshake: &[u8]) -> Option<String> {
     }
 
     None
+}
+
+fn is_valid_sni_hostname(host: &str) -> bool {
+    if host.is_empty() || host.len() > 253 {
+        return false;
+    }
+    if host.starts_with('.') || host.ends_with('.') {
+        return false;
+    }
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return false;
+    }
+
+    for label in host.split('.') {
+        if label.is_empty() || label.len() > 63 {
+            return false;
+        }
+        if label.starts_with('-') || label.ends_with('-') {
+            return false;
+        }
+        if !label
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        {
+            return false;
+        }
+    }
+
+    true
 }
 
 /// Extract ALPN protocol list from ClientHello, return in offered order.

@@ -14,11 +14,40 @@ use crate::network::dns_overrides::resolve_socket_addr;
 use crate::stats::beobachten::BeobachtenStore;
 use crate::transport::proxy_protocol::{ProxyProtocolV1Builder, ProxyProtocolV2Builder};
 
+#[cfg(not(test))]
 const MASK_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const MASK_TIMEOUT: Duration = Duration::from_millis(50);
 /// Maximum duration for the entire masking relay.
 /// Limits resource consumption from slow-loris attacks and port scanners.
+#[cfg(not(test))]
 const MASK_RELAY_TIMEOUT: Duration = Duration::from_secs(60);
+#[cfg(test)]
+const MASK_RELAY_TIMEOUT: Duration = Duration::from_millis(200);
 const MASK_BUFFER_SIZE: usize = 8192;
+
+async fn write_proxy_header_with_timeout<W>(mask_write: &mut W, header: &[u8]) -> bool
+where
+    W: AsyncWrite + Unpin,
+{
+    match timeout(MASK_TIMEOUT, mask_write.write_all(header)).await {
+        Ok(Ok(())) => true,
+        Ok(Err(_)) => false,
+        Err(_) => {
+            debug!("Timeout writing proxy protocol header to mask backend");
+            false
+        }
+    }
+}
+
+async fn consume_client_data_with_timeout<R>(reader: R)
+where
+    R: AsyncRead + Unpin,
+{
+    if timeout(MASK_RELAY_TIMEOUT, consume_client_data(reader)).await.is_err() {
+        debug!("Timed out while consuming client data on masking fallback path");
+    }
+}
 
 /// Detect client type based on initial data
 fn detect_client_type(data: &[u8]) -> &'static str {
@@ -71,7 +100,7 @@ where
 
     if !config.censorship.mask {
         // Masking disabled, just consume data
-        consume_client_data(reader).await;
+        consume_client_data_with_timeout(reader).await;
         return;
     }
 
@@ -107,7 +136,7 @@ where
                     }
                 };
                 if let Some(header) = proxy_header {
-                    if mask_write.write_all(&header).await.is_err() {
+                    if !write_proxy_header_with_timeout(&mut mask_write, &header).await {
                         return;
                     }
                 }
@@ -117,11 +146,11 @@ where
             }
             Ok(Err(e)) => {
                 debug!(error = %e, "Failed to connect to mask unix socket");
-                consume_client_data(reader).await;
+                consume_client_data_with_timeout(reader).await;
             }
             Err(_) => {
                 debug!("Timeout connecting to mask unix socket");
-                consume_client_data(reader).await;
+                consume_client_data_with_timeout(reader).await;
             }
         }
         return;
@@ -166,7 +195,7 @@ where
 
             let (mask_read, mut mask_write) = stream.into_split();
             if let Some(header) = proxy_header {
-                if mask_write.write_all(&header).await.is_err() {
+                if !write_proxy_header_with_timeout(&mut mask_write, &header).await {
                     return;
                 }
             }
@@ -176,11 +205,11 @@ where
         }
         Ok(Err(e)) => {
             debug!(error = %e, "Failed to connect to mask host");
-            consume_client_data(reader).await;
+            consume_client_data_with_timeout(reader).await;
         }
         Err(_) => {
             debug!("Timeout connecting to mask host");
-            consume_client_data(reader).await;
+            consume_client_data_with_timeout(reader).await;
         }
     }
 }

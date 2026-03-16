@@ -3,7 +3,9 @@
 #![allow(dead_code)]
 
 use std::net::SocketAddr;
+use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tracing::{debug, warn, trace};
@@ -20,6 +22,56 @@ use crate::config::ProxyConfig;
 use crate::tls_front::{TlsFrontCache, emulator};
 
 const ACCESS_SECRET_BYTES: usize = 16;
+static INVALID_SECRET_WARNED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+fn warn_invalid_secret_once(name: &str, reason: &str, expected: usize, got: Option<usize>) {
+    let key = format!("{}:{}", name, reason);
+    let warned = INVALID_SECRET_WARNED.get_or_init(|| Mutex::new(HashSet::new()));
+    let should_warn = match warned.lock() {
+        Ok(mut guard) => guard.insert(key),
+        Err(_) => true,
+    };
+
+    if !should_warn {
+        return;
+    }
+
+    match got {
+        Some(actual) => {
+            warn!(
+                user = %name,
+                expected = expected,
+                got = actual,
+                "Skipping user: access secret has unexpected length"
+            );
+        }
+        None => {
+            warn!(
+                user = %name,
+                "Skipping user: access secret is not valid hex"
+            );
+        }
+    }
+}
+
+fn decode_user_secret(name: &str, secret_hex: &str) -> Option<Vec<u8>> {
+    match hex::decode(secret_hex) {
+        Ok(bytes) if bytes.len() == ACCESS_SECRET_BYTES => Some(bytes),
+        Ok(bytes) => {
+            warn_invalid_secret_once(
+                name,
+                "invalid_length",
+                ACCESS_SECRET_BYTES,
+                Some(bytes.len()),
+            );
+            None
+        }
+        Err(_) => {
+            warn_invalid_secret_once(name, "invalid_hex", ACCESS_SECRET_BYTES, None);
+            None
+        }
+    }
+}
 
 // Decide whether a client-supplied proto tag is allowed given the configured
 // proxy modes and the transport that carried the handshake.
@@ -51,8 +103,7 @@ fn decode_user_secrets(
 
     if let Some(preferred) = preferred_user
         && let Some(secret_hex) = config.access.users.get(preferred)
-        && let Ok(bytes) = hex::decode(secret_hex)
-        && bytes.len() == ACCESS_SECRET_BYTES
+        && let Some(bytes) = decode_user_secret(preferred, secret_hex)
     {
         secrets.push((preferred.to_string(), bytes));
     }
@@ -61,9 +112,7 @@ fn decode_user_secrets(
         if preferred_user.is_some_and(|preferred| preferred == name.as_str()) {
             continue;
         }
-        if let Ok(bytes) = hex::decode(secret_hex)
-            && bytes.len() == ACCESS_SECRET_BYTES
-        {
+        if let Some(bytes) = decode_user_secret(name, secret_hex) {
             secrets.push((name.clone(), bytes));
         }
     }
@@ -193,6 +242,9 @@ where
             Some(b"h2".to_vec())
         } else if alpn_list.iter().any(|p| p == b"http/1.1") {
             Some(b"http/1.1".to_vec())
+        } else if !alpn_list.is_empty() {
+            debug!(peer = %peer, "Client ALPN list has no supported protocol; using masking fallback");
+            return HandshakeResult::BadClient { reader, writer };
         } else {
             None
         }

@@ -286,8 +286,8 @@ fn boot_time_timestamp_accepted_without_ignore_flag() {
     // Timestamps below the boot-time threshold are treated as client uptime,
     // not real wall-clock time.  The proxy allows them regardless of skew.
     let secret = b"boot_time_test";
-    // 86_400_000 / 2 is well below the boot-time threshold (~2.74 years worth of seconds).
-    let boot_ts: u32 = 86_400_000 / 2;
+    // Keep this safely below BOOT_TIME_MAX_SECS to assert bypass behavior.
+    let boot_ts: u32 = BOOT_TIME_MAX_SECS / 2;
     let handshake = make_valid_tls_handshake(secret, boot_ts);
     let secrets = vec![("u".to_string(), secret.to_vec())];
     assert!(
@@ -611,13 +611,13 @@ fn zero_length_session_id_accepted() {
 // Boot-time threshold — exact boundary precision
 // ------------------------------------------------------------------
 
-/// timestamp = 86_399_999 is the last value inside the boot-time window.
+/// timestamp = BOOT_TIME_MAX_SECS - 1 is the last value inside the boot-time window.
 /// is_boot_time = true → skew check is skipped entirely → accepted even
 /// when `now` is far from the timestamp.
 #[test]
 fn timestamp_one_below_boot_threshold_bypasses_skew_check() {
     let secret = b"boot_last_value_test";
-    let ts: u32 = 86_400_000 - 1;
+    let ts: u32 = BOOT_TIME_MAX_SECS - 1;
     let h = make_valid_tls_handshake(secret, ts);
     let secrets = vec![("u".to_string(), secret.to_vec())];
 
@@ -625,17 +625,17 @@ fn timestamp_one_below_boot_threshold_bypasses_skew_check() {
     // Boot-time bypass must prevent the skew check from running.
     assert!(
         validate_tls_handshake_at_time(&h, &secrets, false, 0).is_some(),
-        "ts=86_399_999 must bypass skew check regardless of now"
+        "ts=BOOT_TIME_MAX_SECS-1 must bypass skew check regardless of now"
     );
 }
 
-/// timestamp = 86_400_000 is the first value outside the boot-time window.
+/// timestamp = BOOT_TIME_MAX_SECS is the first value outside the boot-time window.
 /// is_boot_time = false → skew check IS applied.  Two sub-cases confirm this:
 /// once with now chosen so the skew passes (accepted) and once where it fails.
 #[test]
 fn timestamp_at_boot_threshold_triggers_skew_check() {
     let secret = b"boot_exact_value_test";
-    let ts: u32 = 86_400_000;
+    let ts: u32 = BOOT_TIME_MAX_SECS;
     let h = make_valid_tls_handshake(secret, ts);
     let secrets = vec![("u".to_string(), secret.to_vec())];
 
@@ -643,14 +643,14 @@ fn timestamp_at_boot_threshold_triggers_skew_check() {
     let now_valid: i64 = ts as i64 + 50;
     assert!(
         validate_tls_handshake_at_time(&h, &secrets, false, now_valid).is_some(),
-        "ts=86_400_000 within skew window must be accepted via skew check"
+        "ts=BOOT_TIME_MAX_SECS within skew window must be accepted via skew check"
     );
 
     // now = 0 → time_diff = -86_400_000, outside window → rejected.
     // If the boot-time bypass were wrongly applied here this would pass.
     assert!(
         validate_tls_handshake_at_time(&h, &secrets, false, 0).is_none(),
-        "ts=86_400_000 far from now must be rejected — no boot-time bypass"
+        "ts=BOOT_TIME_MAX_SECS far from now must be rejected — no boot-time bypass"
     );
 }
 
@@ -675,7 +675,7 @@ fn u32_max_timestamp_accepted_with_ignore_time_skew() {
     );
 }
 
-/// u32::MAX > 86_400_000 so the skew check runs.  With any realistic `now`
+/// u32::MAX > BOOT_TIME_MAX_SECS so the skew check runs.  With any realistic `now`
 /// (~1.7 billion), time_diff = now - u32::MAX is deeply negative — far outside
 /// [-1200, 600] — so the handshake must be rejected without overflow.
 #[test]
@@ -1106,6 +1106,25 @@ fn extract_sni_rejects_zero_length_host_name() {
     ext_blob.extend_from_slice(&sni_ext);
 
     let ch = build_client_hello_with_raw_extensions(&ext_blob);
+    assert!(extract_sni_from_client_hello(&ch).is_none());
+}
+
+#[test]
+fn extract_sni_rejects_raw_ipv4_literals() {
+    let ch = build_client_hello_with_exts(Vec::new(), "203.0.113.10");
+    assert!(extract_sni_from_client_hello(&ch).is_none());
+}
+
+#[test]
+fn extract_sni_rejects_invalid_label_characters() {
+    let ch = build_client_hello_with_exts(Vec::new(), "exa_mple.com");
+    assert!(extract_sni_from_client_hello(&ch).is_none());
+}
+
+#[test]
+fn extract_sni_rejects_oversized_label() {
+    let oversized = format!("{}.example.com", "a".repeat(64));
+    let ch = build_client_hello_with_exts(Vec::new(), &oversized);
     assert!(extract_sni_from_client_hello(&ch).is_none());
 }
 

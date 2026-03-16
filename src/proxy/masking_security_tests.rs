@@ -1,5 +1,7 @@
 use super::*;
 use crate::config::ProxyConfig;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use tokio::io::{duplex, AsyncBufReadExt, BufReader};
 use tokio::net::TcpListener;
 #[cfg(unix)]
@@ -483,4 +485,60 @@ async fn unix_socket_mask_path_forwards_probe_and_response() {
 
     accept_task.await.unwrap();
     let _ = std::fs::remove_file(sock_path);
+}
+
+#[tokio::test]
+async fn mask_disabled_slowloris_connection_is_closed_by_consume_timeout() {
+    let mut config = ProxyConfig::default();
+    config.general.beobachten = false;
+    config.censorship.mask = false;
+
+    let peer: SocketAddr = "198.51.100.33:45455".parse().unwrap();
+    let local_addr: SocketAddr = "127.0.0.1:443".parse().unwrap();
+
+    let (_client_reader_side, client_reader) = duplex(256);
+    let (_client_visible_reader, client_visible_writer) = duplex(256);
+    let beobachten = BeobachtenStore::new();
+
+    let task = tokio::spawn(async move {
+        handle_bad_client(
+            client_reader,
+            client_visible_writer,
+            b"slowloris",
+            peer,
+            local_addr,
+            &config,
+            &beobachten,
+        )
+        .await;
+    });
+
+    timeout(Duration::from_secs(1), task).await.unwrap().unwrap();
+}
+
+struct PendingWriter;
+
+impl tokio::io::AsyncWrite for PendingWriter {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        _buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Poll::Pending
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+#[tokio::test]
+async fn proxy_header_write_timeout_returns_false() {
+    let mut writer = PendingWriter;
+    let ok = write_proxy_header_with_timeout(&mut writer, b"PROXY UNKNOWN\r\n").await;
+    assert!(!ok, "Proxy header writes that never complete must time out");
 }

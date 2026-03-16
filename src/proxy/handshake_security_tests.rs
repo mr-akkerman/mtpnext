@@ -1,6 +1,7 @@
 use super::*;
 use crate::crypto::sha256_hmac;
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 fn make_valid_tls_handshake(secret: &[u8], timestamp: u32) -> Vec<u8> {
     let session_id_len: usize = 32;
@@ -20,6 +21,64 @@ fn make_valid_tls_handshake(secret: &[u8], timestamp: u32) -> Vec<u8> {
     handshake[tls::TLS_DIGEST_POS..tls::TLS_DIGEST_POS + tls::TLS_DIGEST_LEN]
         .copy_from_slice(&digest);
     handshake
+}
+
+fn make_valid_tls_client_hello_with_alpn(
+    secret: &[u8],
+    timestamp: u32,
+    alpn_protocols: &[&[u8]],
+) -> Vec<u8> {
+    let mut body = Vec::new();
+    body.extend_from_slice(&TLS_VERSION);
+    body.extend_from_slice(&[0u8; 32]);
+    body.push(32);
+    body.extend_from_slice(&[0x42u8; 32]);
+    body.extend_from_slice(&2u16.to_be_bytes());
+    body.extend_from_slice(&[0x13, 0x01]);
+    body.push(1);
+    body.push(0);
+
+    let mut ext_blob = Vec::new();
+    if !alpn_protocols.is_empty() {
+        let mut alpn_list = Vec::new();
+        for proto in alpn_protocols {
+            alpn_list.push(proto.len() as u8);
+            alpn_list.extend_from_slice(proto);
+        }
+        let mut alpn_data = Vec::new();
+        alpn_data.extend_from_slice(&(alpn_list.len() as u16).to_be_bytes());
+        alpn_data.extend_from_slice(&alpn_list);
+
+        ext_blob.extend_from_slice(&0x0010u16.to_be_bytes());
+        ext_blob.extend_from_slice(&(alpn_data.len() as u16).to_be_bytes());
+        ext_blob.extend_from_slice(&alpn_data);
+    }
+    body.extend_from_slice(&(ext_blob.len() as u16).to_be_bytes());
+    body.extend_from_slice(&ext_blob);
+
+    let mut handshake = Vec::new();
+    handshake.push(0x01);
+    let body_len = (body.len() as u32).to_be_bytes();
+    handshake.extend_from_slice(&body_len[1..4]);
+    handshake.extend_from_slice(&body);
+
+    let mut record = Vec::new();
+    record.push(TLS_RECORD_HANDSHAKE);
+    record.extend_from_slice(&[0x03, 0x01]);
+    record.extend_from_slice(&(handshake.len() as u16).to_be_bytes());
+    record.extend_from_slice(&handshake);
+
+    record[tls::TLS_DIGEST_POS..tls::TLS_DIGEST_POS + tls::TLS_DIGEST_LEN].fill(0);
+    let computed = sha256_hmac(secret, &record);
+    let mut digest = computed;
+    let ts = timestamp.to_le_bytes();
+    for i in 0..4 {
+        digest[28 + i] ^= ts[i];
+    }
+    record[tls::TLS_DIGEST_POS..tls::TLS_DIGEST_POS + tls::TLS_DIGEST_LEN]
+        .copy_from_slice(&digest);
+
+    record
 }
 
 fn test_config_with_secret_hex(secret_hex: &str) -> ProxyConfig {
@@ -252,6 +311,51 @@ async fn tls_replay_second_identical_handshake_is_rejected() {
 }
 
 #[tokio::test]
+async fn tls_replay_concurrent_identical_handshake_allows_exactly_one_success() {
+    let secret = [0x77u8; 16];
+    let config = Arc::new(test_config_with_secret_hex("77777777777777777777777777777777"));
+    let replay_checker = Arc::new(ReplayChecker::new(4096, Duration::from_secs(60)));
+    let rng = Arc::new(SecureRandom::new());
+    let handshake = Arc::new(make_valid_tls_handshake(&secret, 0));
+
+    let mut tasks = Vec::new();
+    for _ in 0..50 {
+        let config = config.clone();
+        let replay_checker = replay_checker.clone();
+        let rng = rng.clone();
+        let handshake = handshake.clone();
+        tasks.push(tokio::spawn(async move {
+            handle_tls_handshake(
+                &handshake,
+                tokio::io::empty(),
+                tokio::io::sink(),
+                "127.0.0.1:45000".parse().unwrap(),
+                &config,
+                &replay_checker,
+                &rng,
+                None,
+            )
+            .await
+        }));
+    }
+
+    let mut success_count = 0usize;
+    for task in tasks {
+        let result = task.await.unwrap();
+        if matches!(result, HandshakeResult::Success(_)) {
+            success_count += 1;
+        } else {
+            assert!(matches!(result, HandshakeResult::BadClient { .. }));
+        }
+    }
+
+    assert_eq!(
+        success_count, 1,
+        "Concurrent replay attempts must allow exactly one successful handshake"
+    );
+}
+
+#[tokio::test]
 async fn invalid_tls_probe_does_not_pollute_replay_cache() {
     let config = test_config_with_secret_hex("11111111111111111111111111111111");
     let replay_checker = ReplayChecker::new(128, Duration::from_secs(60));
@@ -385,6 +489,158 @@ async fn mixed_secret_lengths_keep_valid_user_authenticating() {
     .await;
 
     assert!(matches!(result, HandshakeResult::Success(_)));
+}
+
+#[tokio::test]
+async fn alpn_enforce_rejects_unsupported_client_alpn() {
+    let secret = [0x33u8; 16];
+    let mut config = test_config_with_secret_hex("33333333333333333333333333333333");
+    config.censorship.alpn_enforce = true;
+
+    let replay_checker = ReplayChecker::new(128, Duration::from_secs(60));
+    let rng = SecureRandom::new();
+    let peer: SocketAddr = "127.0.0.1:44327".parse().unwrap();
+    let handshake = make_valid_tls_client_hello_with_alpn(&secret, 0, &[b"h3"]);
+
+    let result = handle_tls_handshake(
+        &handshake,
+        tokio::io::empty(),
+        tokio::io::sink(),
+        peer,
+        &config,
+        &replay_checker,
+        &rng,
+        None,
+    )
+    .await;
+
+    assert!(matches!(result, HandshakeResult::BadClient { .. }));
+}
+
+#[tokio::test]
+async fn alpn_enforce_accepts_h2() {
+    let secret = [0x44u8; 16];
+    let mut config = test_config_with_secret_hex("44444444444444444444444444444444");
+    config.censorship.alpn_enforce = true;
+
+    let replay_checker = ReplayChecker::new(128, Duration::from_secs(60));
+    let rng = SecureRandom::new();
+    let peer: SocketAddr = "127.0.0.1:44328".parse().unwrap();
+    let handshake = make_valid_tls_client_hello_with_alpn(&secret, 0, &[b"h2", b"h3"]);
+
+    let result = handle_tls_handshake(
+        &handshake,
+        tokio::io::empty(),
+        tokio::io::sink(),
+        peer,
+        &config,
+        &replay_checker,
+        &rng,
+        None,
+    )
+    .await;
+
+    assert!(matches!(result, HandshakeResult::Success(_)));
+}
+
+#[tokio::test]
+async fn malformed_tls_classes_complete_within_bounded_time() {
+    let secret = [0x55u8; 16];
+    let mut config = test_config_with_secret_hex("55555555555555555555555555555555");
+    config.censorship.alpn_enforce = true;
+
+    let replay_checker = ReplayChecker::new(512, Duration::from_secs(60));
+    let rng = SecureRandom::new();
+    let peer: SocketAddr = "127.0.0.1:44329".parse().unwrap();
+
+    let too_short = vec![0x16, 0x03, 0x01];
+
+    let mut bad_hmac = make_valid_tls_handshake(&secret, 0);
+    bad_hmac[tls::TLS_DIGEST_POS] ^= 0x01;
+
+    let alpn_mismatch = make_valid_tls_client_hello_with_alpn(&secret, 0, &[b"h3"]);
+
+    for probe in [too_short, bad_hmac, alpn_mismatch] {
+        let result = tokio::time::timeout(
+            Duration::from_millis(200),
+            handle_tls_handshake(
+                &probe,
+                tokio::io::empty(),
+                tokio::io::sink(),
+                peer,
+                &config,
+                &replay_checker,
+                &rng,
+                None,
+            ),
+        )
+        .await
+        .expect("Malformed TLS classes must be rejected within bounded time");
+
+        assert!(matches!(result, HandshakeResult::BadClient { .. }));
+    }
+}
+
+#[tokio::test]
+async fn malformed_tls_classes_share_close_latency_buckets() {
+    const ITER: usize = 24;
+    const BUCKET_MS: u128 = 10;
+
+    let secret = [0x99u8; 16];
+    let mut config = test_config_with_secret_hex("99999999999999999999999999999999");
+    config.censorship.alpn_enforce = true;
+
+    let replay_checker = ReplayChecker::new(4096, Duration::from_secs(60));
+    let rng = SecureRandom::new();
+    let peer: SocketAddr = "127.0.0.1:44330".parse().unwrap();
+
+    let too_short = vec![0x16, 0x03, 0x01];
+
+    let mut bad_hmac = make_valid_tls_handshake(&secret, 0);
+    bad_hmac[tls::TLS_DIGEST_POS + 1] ^= 0x01;
+
+    let alpn_mismatch = make_valid_tls_client_hello_with_alpn(&secret, 0, &[b"h3"]);
+
+    let mut class_means_ms = Vec::new();
+    for probe in [too_short, bad_hmac, alpn_mismatch] {
+        let mut sum_micros: u128 = 0;
+        for _ in 0..ITER {
+            let started = Instant::now();
+            let result = handle_tls_handshake(
+                &probe,
+                tokio::io::empty(),
+                tokio::io::sink(),
+                peer,
+                &config,
+                &replay_checker,
+                &rng,
+                None,
+            )
+            .await;
+            let elapsed = started.elapsed();
+            assert!(matches!(result, HandshakeResult::BadClient { .. }));
+            sum_micros += elapsed.as_micros();
+        }
+
+        class_means_ms.push(sum_micros / ITER as u128 / 1_000);
+    }
+
+    let min_bucket = class_means_ms
+        .iter()
+        .map(|ms| ms / BUCKET_MS)
+        .min()
+        .unwrap();
+    let max_bucket = class_means_ms
+        .iter()
+        .map(|ms| ms / BUCKET_MS)
+        .max()
+        .unwrap();
+
+    assert!(
+        max_bucket <= min_bucket + 1,
+        "Malformed TLS classes diverged across latency buckets: means_ms={:?}",
+        class_means_ms
+    );
 }
 
 #[test]
