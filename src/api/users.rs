@@ -386,7 +386,16 @@ pub(super) async fn users_from_config(
                 .get(&username)
                 .map(chrono::DateTime::<chrono::Utc>::to_rfc3339),
             data_quota_bytes: cfg.access.user_data_quota.get(&username).copied(),
-            max_unique_ips: cfg.access.user_max_unique_ips.get(&username).copied(),
+            max_unique_ips: cfg
+                .access
+                .user_max_unique_ips
+                .get(&username)
+                .copied()
+                .filter(|limit| *limit > 0)
+                .or(
+                    (cfg.access.user_max_unique_ips_global_each > 0)
+                        .then_some(cfg.access.user_max_unique_ips_global_each),
+                ),
             current_connections: stats.get_user_curr_connects(&username),
             active_unique_ips: active_ip_list.len(),
             active_unique_ips_list: active_ip_list,

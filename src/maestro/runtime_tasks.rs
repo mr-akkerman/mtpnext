@@ -131,6 +131,10 @@ pub(crate) async fn spawn_runtime_tasks(
     let mut config_rx_ip_limits = config_rx.clone();
     tokio::spawn(async move {
         let mut prev_limits = config_rx_ip_limits.borrow().access.user_max_unique_ips.clone();
+        let mut prev_global_each = config_rx_ip_limits
+            .borrow()
+            .access
+            .user_max_unique_ips_global_each;
         let mut prev_mode = config_rx_ip_limits.borrow().access.user_max_unique_ips_mode;
         let mut prev_window = config_rx_ip_limits
             .borrow()
@@ -143,9 +147,17 @@ pub(crate) async fn spawn_runtime_tasks(
             }
             let cfg = config_rx_ip_limits.borrow_and_update().clone();
 
-            if prev_limits != cfg.access.user_max_unique_ips {
-                ip_tracker_policy.load_limits(&cfg.access.user_max_unique_ips).await;
+            if prev_limits != cfg.access.user_max_unique_ips
+                || prev_global_each != cfg.access.user_max_unique_ips_global_each
+            {
+                ip_tracker_policy
+                    .load_limits(
+                        cfg.access.user_max_unique_ips_global_each,
+                        &cfg.access.user_max_unique_ips,
+                    )
+                    .await;
                 prev_limits = cfg.access.user_max_unique_ips.clone();
+                prev_global_each = cfg.access.user_max_unique_ips_global_each;
             }
 
             if prev_mode != cfg.access.user_max_unique_ips_mode

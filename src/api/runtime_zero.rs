@@ -90,6 +90,7 @@ pub(super) struct EffectiveMiddleProxyLimits {
 
 #[derive(Serialize)]
 pub(super) struct EffectiveUserIpPolicyLimits {
+    pub(super) global_each: usize,
     pub(super) mode: &'static str,
     pub(super) window_secs: u64,
 }
@@ -262,6 +263,7 @@ pub(super) fn build_limits_effective_data(cfg: &ProxyConfig) -> EffectiveLimitsD
             me2dc_fallback: cfg.general.me2dc_fallback,
         },
         user_ip_policy: EffectiveUserIpPolicyLimits {
+            global_each: cfg.access.user_max_unique_ips_global_each,
             mode: user_max_unique_ips_mode_label(cfg.access.user_max_unique_ips_mode),
             window_secs: cfg.access.user_max_unique_ips_window_secs,
         },

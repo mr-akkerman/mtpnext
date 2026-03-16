@@ -58,7 +58,7 @@ pub async fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
     startup_tracker
         .start_component(COMPONENT_CONFIG_LOAD, Some("load and validate config".to_string()))
         .await;
-    let (config_path, cli_silent, cli_log_level) = parse_cli();
+    let (config_path, data_path, cli_silent, cli_log_level) = parse_cli();
 
     let mut config = match ProxyConfig::load(&config_path) {
         Ok(c) => c,
@@ -78,6 +78,34 @@ pub async fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
     if let Err(e) = config.validate() {
         eprintln!("[telemt] Invalid config: {}", e);
         std::process::exit(1);
+    }
+
+    if let Some(p) = data_path {
+        config.general.data_path = Some(p);
+    }
+
+    if let Some(ref data_path) = config.general.data_path {
+        if !data_path.is_absolute() {
+            eprintln!("[telemt] data_path must be absolute: {}", data_path.display());
+            std::process::exit(1);
+        }
+
+        if data_path.exists() {
+            if !data_path.is_dir() {
+                eprintln!("[telemt] data_path exists but is not a directory: {}", data_path.display());
+                std::process::exit(1);
+            }
+        } else {
+            if let Err(e) = std::fs::create_dir_all(data_path) {
+                eprintln!("[telemt] Can't create data_path {}: {}", data_path.display(), e);
+                std::process::exit(1);
+            }
+        }
+
+        if let Err(e) = std::env::set_current_dir(data_path) {
+            eprintln!("[telemt] Can't use data_path {}: {}", data_path.display(), e);
+            std::process::exit(1);
+        }
     }
 
     if let Err(e) = crate::network::dns_overrides::install_entries(&config.network.dns_overrides) {
@@ -168,17 +196,24 @@ pub async fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
         stats.clone(),
     ));
     let ip_tracker = Arc::new(UserIpTracker::new());
-    ip_tracker.load_limits(&config.access.user_max_unique_ips).await;
+    ip_tracker
+        .load_limits(
+            config.access.user_max_unique_ips_global_each,
+            &config.access.user_max_unique_ips,
+        )
+        .await;
     ip_tracker
         .set_limit_policy(
             config.access.user_max_unique_ips_mode,
             config.access.user_max_unique_ips_window_secs,
         )
         .await;
-    if !config.access.user_max_unique_ips.is_empty() {
+    if config.access.user_max_unique_ips_global_each > 0 || !config.access.user_max_unique_ips.is_empty()
+    {
         info!(
-            "IP limits configured for {} users",
-            config.access.user_max_unique_ips.len()
+            global_each_limit = config.access.user_max_unique_ips_global_each,
+            explicit_user_limits = config.access.user_max_unique_ips.len(),
+            "User unique IP limits configured"
         );
     }
     if !config.network.dns_overrides.is_empty() {

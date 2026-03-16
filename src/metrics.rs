@@ -1774,14 +1774,24 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
             "# HELP telemt_user_unique_ips_recent_window Per-user unique IPs seen in configured observation window"
         );
         let _ = writeln!(out, "# TYPE telemt_user_unique_ips_recent_window gauge");
-        let _ = writeln!(out, "# HELP telemt_user_unique_ips_limit Per-user configured unique IP limit (0 means unlimited)");
+        let _ = writeln!(out, "# HELP telemt_user_unique_ips_limit Effective per-user unique IP limit (0 means unlimited)");
         let _ = writeln!(out, "# TYPE telemt_user_unique_ips_limit gauge");
         let _ = writeln!(out, "# HELP telemt_user_unique_ips_utilization Per-user unique IP usage ratio (0 for unlimited)");
         let _ = writeln!(out, "# TYPE telemt_user_unique_ips_utilization gauge");
 
         for user in unique_users {
             let current = ip_counts.get(&user).copied().unwrap_or(0);
-            let limit = config.access.user_max_unique_ips.get(&user).copied().unwrap_or(0);
+            let limit = config
+                .access
+                .user_max_unique_ips
+                .get(&user)
+                .copied()
+                .filter(|limit| *limit > 0)
+                .or(
+                    (config.access.user_max_unique_ips_global_each > 0)
+                        .then_some(config.access.user_max_unique_ips_global_each),
+                )
+                .unwrap_or(0);
             let utilization = if limit > 0 {
                 current as f64 / limit as f64
             } else {
@@ -1902,6 +1912,25 @@ mod tests {
         assert!(output.contains("telemt_handshake_timeouts_total 0"));
         assert!(output.contains("telemt_user_unique_ips_current{user="));
         assert!(output.contains("telemt_user_unique_ips_recent_window{user="));
+    }
+
+    #[tokio::test]
+    async fn test_render_uses_global_each_unique_ip_limit() {
+        let stats = Stats::new();
+        stats.increment_user_connects("alice");
+        stats.increment_user_curr_connects("alice");
+        let tracker = UserIpTracker::new();
+        tracker
+            .check_and_add("alice", "203.0.113.10".parse().unwrap())
+            .await
+            .unwrap();
+        let mut config = ProxyConfig::default();
+        config.access.user_max_unique_ips_global_each = 2;
+
+        let output = render_metrics(&stats, &config, &tracker).await;
+
+        assert!(output.contains("telemt_user_unique_ips_limit{user=\"alice\"} 2"));
+        assert!(output.contains("telemt_user_unique_ips_utilization{user=\"alice\"} 0.500000"));
     }
 
     #[tokio::test]

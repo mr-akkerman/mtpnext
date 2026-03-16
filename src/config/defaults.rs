@@ -584,6 +584,10 @@ pub(crate) fn default_me_pool_drain_ttl_secs() -> u64 {
     90
 }
 
+pub(crate) fn default_me_pool_drain_threshold() -> u64 {
+    128
+}
+
 pub(crate) fn default_me_bind_stale_ttl_secs() -> u64 {
     default_me_pool_drain_ttl_secs()
 }
@@ -633,6 +637,10 @@ pub(crate) fn default_access_users() -> HashMap<String, String> {
 
 pub(crate) fn default_user_max_unique_ips_window_secs() -> u64 {
     DEFAULT_USER_MAX_UNIQUE_IPS_WINDOW_SECS
+}
+
+pub(crate) fn default_user_max_unique_ips_global_each() -> usize {
+    0
 }
 
 // Custom deserializer helpers

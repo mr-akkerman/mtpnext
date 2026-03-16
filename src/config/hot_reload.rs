@@ -55,6 +55,7 @@ pub struct HotFields {
     pub me_reinit_coalesce_window_ms: u64,
     pub hardswap:                bool,
     pub me_pool_drain_ttl_secs:  u64,
+    pub me_pool_drain_threshold: u64,
     pub me_pool_min_fresh_ratio: f32,
     pub me_reinit_drain_timeout_secs: u64,
     pub me_hardswap_warmup_delay_min_ms: u64,
@@ -118,6 +119,7 @@ pub struct HotFields {
     pub user_expirations:        std::collections::HashMap<String, chrono::DateTime<chrono::Utc>>,
     pub user_data_quota:         std::collections::HashMap<String, u64>,
     pub user_max_unique_ips:     std::collections::HashMap<String, usize>,
+    pub user_max_unique_ips_global_each: usize,
     pub user_max_unique_ips_mode: crate::config::UserMaxUniqueIpsMode,
     pub user_max_unique_ips_window_secs: u64,
 }
@@ -135,6 +137,7 @@ impl HotFields {
             me_reinit_coalesce_window_ms: cfg.general.me_reinit_coalesce_window_ms,
             hardswap:                cfg.general.hardswap,
             me_pool_drain_ttl_secs:  cfg.general.me_pool_drain_ttl_secs,
+            me_pool_drain_threshold: cfg.general.me_pool_drain_threshold,
             me_pool_min_fresh_ratio: cfg.general.me_pool_min_fresh_ratio,
             me_reinit_drain_timeout_secs: cfg.general.me_reinit_drain_timeout_secs,
             me_hardswap_warmup_delay_min_ms: cfg.general.me_hardswap_warmup_delay_min_ms,
@@ -232,6 +235,7 @@ impl HotFields {
             user_expirations:        cfg.access.user_expirations.clone(),
             user_data_quota:         cfg.access.user_data_quota.clone(),
             user_max_unique_ips:     cfg.access.user_max_unique_ips.clone(),
+            user_max_unique_ips_global_each: cfg.access.user_max_unique_ips_global_each,
             user_max_unique_ips_mode: cfg.access.user_max_unique_ips_mode,
             user_max_unique_ips_window_secs: cfg.access.user_max_unique_ips_window_secs,
         }
@@ -450,6 +454,7 @@ fn overlay_hot_fields(old: &ProxyConfig, new: &ProxyConfig) -> ProxyConfig {
     cfg.general.me_reinit_coalesce_window_ms = new.general.me_reinit_coalesce_window_ms;
     cfg.general.hardswap = new.general.hardswap;
     cfg.general.me_pool_drain_ttl_secs = new.general.me_pool_drain_ttl_secs;
+    cfg.general.me_pool_drain_threshold = new.general.me_pool_drain_threshold;
     cfg.general.me_pool_min_fresh_ratio = new.general.me_pool_min_fresh_ratio;
     cfg.general.me_reinit_drain_timeout_secs = new.general.me_reinit_drain_timeout_secs;
     cfg.general.me_hardswap_warmup_delay_min_ms = new.general.me_hardswap_warmup_delay_min_ms;
@@ -532,6 +537,7 @@ fn overlay_hot_fields(old: &ProxyConfig, new: &ProxyConfig) -> ProxyConfig {
     cfg.access.user_expirations = new.access.user_expirations.clone();
     cfg.access.user_data_quota = new.access.user_data_quota.clone();
     cfg.access.user_max_unique_ips = new.access.user_max_unique_ips.clone();
+    cfg.access.user_max_unique_ips_global_each = new.access.user_max_unique_ips_global_each;
     cfg.access.user_max_unique_ips_mode = new.access.user_max_unique_ips_mode;
     cfg.access.user_max_unique_ips_window_secs = new.access.user_max_unique_ips_window_secs;
 
@@ -823,6 +829,13 @@ fn log_changes(
         );
     }
 
+    if old_hot.me_pool_drain_threshold != new_hot.me_pool_drain_threshold {
+        info!(
+            "config reload: me_pool_drain_threshold: {} → {}",
+            old_hot.me_pool_drain_threshold, new_hot.me_pool_drain_threshold,
+        );
+    }
+
     if (old_hot.me_pool_min_fresh_ratio - new_hot.me_pool_min_fresh_ratio).abs() > f32::EPSILON {
         info!(
             "config reload: me_pool_min_fresh_ratio: {:.3} → {:.3}",
@@ -1099,12 +1112,14 @@ fn log_changes(
             new_hot.user_max_unique_ips.len()
         );
     }
-    if old_hot.user_max_unique_ips_mode != new_hot.user_max_unique_ips_mode
+    if old_hot.user_max_unique_ips_global_each != new_hot.user_max_unique_ips_global_each
+        || old_hot.user_max_unique_ips_mode != new_hot.user_max_unique_ips_mode
         || old_hot.user_max_unique_ips_window_secs
             != new_hot.user_max_unique_ips_window_secs
     {
         info!(
-            "config reload: user_max_unique_ips policy mode={:?} window={}s",
+            "config reload: user_max_unique_ips policy global_each={} mode={:?} window={}s",
+            new_hot.user_max_unique_ips_global_each,
             new_hot.user_max_unique_ips_mode,
             new_hot.user_max_unique_ips_window_secs
         );
