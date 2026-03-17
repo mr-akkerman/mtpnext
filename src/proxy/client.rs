@@ -24,6 +24,39 @@ enum HandshakeOutcome {
     Handled,
 }
 
+struct UserConnectionReservation {
+    stats: Arc<Stats>,
+    ip_tracker: Arc<UserIpTracker>,
+    user: String,
+    ip: IpAddr,
+}
+
+impl UserConnectionReservation {
+    fn new(stats: Arc<Stats>, ip_tracker: Arc<UserIpTracker>, user: String, ip: IpAddr) -> Self {
+        Self {
+            stats,
+            ip_tracker,
+            user,
+            ip,
+        }
+    }
+}
+
+impl Drop for UserConnectionReservation {
+    fn drop(&mut self) {
+        self.stats.decrement_user_curr_connects(&self.user);
+
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let ip_tracker = self.ip_tracker.clone();
+            let user = self.user.clone();
+            let ip = self.ip;
+            handle.spawn(async move {
+                ip_tracker.remove_ip(&user, ip).await;
+            });
+        }
+    }
+}
+
 use crate::config::ProxyConfig;
 use crate::crypto::SecureRandom;
 use crate::error::{HandshakeResult, ProxyError, Result, StreamError};
@@ -90,6 +123,10 @@ fn is_trusted_proxy_source(peer_ip: IpAddr, trusted: &[IpNetwork]) -> bool {
     trusted.iter().any(|cidr| cidr.contains(peer_ip))
 }
 
+fn synthetic_local_addr(port: u16) -> SocketAddr {
+    SocketAddr::from(([0, 0, 0, 0], port))
+}
+
 pub async fn handle_client_stream<S>(
     mut stream: S,
     peer: SocketAddr,
@@ -113,9 +150,7 @@ where
     let mut real_peer = normalize_ip(peer);
 
     // For non-TCP streams, use a synthetic local address; may be overridden by PROXY protocol dst
-    let mut local_addr: SocketAddr = format!("0.0.0.0:{}", config.server.port)
-        .parse()
-        .unwrap_or_else(|_| "0.0.0.0:443".parse().unwrap());
+    let mut local_addr = synthetic_local_addr(config.server.port);
 
     if proxy_protocol_enabled {
         let proxy_header_timeout = Duration::from_millis(
@@ -798,10 +833,22 @@ impl RunningClientHandler {
     {
         let user = success.user.clone();
 
-        if let Err(e) = Self::check_user_limits_static(&user, &config, &stats, peer_addr, &ip_tracker).await {
-            warn!(user = %user, error = %e, "User limit exceeded");
-            return Err(e);
-        }
+        let _user_limit_reservation =
+            match Self::acquire_user_connection_reservation_static(
+                &user,
+                &config,
+                stats.clone(),
+                peer_addr,
+                ip_tracker,
+            )
+            .await
+            {
+                Ok(reservation) => reservation,
+                Err(e) => {
+                    warn!(user = %user, error = %e, "User limit exceeded");
+                    return Err(e);
+                }
+            };
 
         let route_snapshot = route_runtime.snapshot();
         let session_id = rng.u64();
@@ -858,12 +905,64 @@ impl RunningClientHandler {
             )
             .await
         };
-
-        stats.decrement_user_curr_connects(&user);
-        ip_tracker.remove_ip(&user, peer_addr.ip()).await;
         relay_result
     }
 
+    async fn acquire_user_connection_reservation_static(
+        user: &str,
+        config: &ProxyConfig,
+        stats: Arc<Stats>,
+        peer_addr: SocketAddr,
+        ip_tracker: Arc<UserIpTracker>,
+    ) -> Result<UserConnectionReservation> {
+        if let Some(expiration) = config.access.user_expirations.get(user)
+            && chrono::Utc::now() > *expiration
+        {
+            return Err(ProxyError::UserExpired {
+                user: user.to_string(),
+            });
+        }
+
+        if let Some(quota) = config.access.user_data_quota.get(user)
+            && stats.get_user_total_octets(user) >= *quota
+        {
+            return Err(ProxyError::DataQuotaExceeded {
+                user: user.to_string(),
+            });
+        }
+
+        let limit = config.access.user_max_tcp_conns.get(user).map(|v| *v as u64);
+        if !stats.try_acquire_user_curr_connects(user, limit) {
+            return Err(ProxyError::ConnectionLimitExceeded {
+                user: user.to_string(),
+            });
+        }
+
+        match ip_tracker.check_and_add(user, peer_addr.ip()).await {
+            Ok(()) => {}
+            Err(reason) => {
+                stats.decrement_user_curr_connects(user);
+                warn!(
+                    user = %user,
+                    ip = %peer_addr.ip(),
+                    reason = %reason,
+                    "IP limit exceeded"
+                );
+                return Err(ProxyError::ConnectionLimitExceeded {
+                    user: user.to_string(),
+                });
+            }
+        }
+
+        Ok(UserConnectionReservation::new(
+            stats,
+            ip_tracker,
+            user.to_string(),
+            peer_addr.ip(),
+        ))
+    }
+
+    #[cfg(test)]
     async fn check_user_limits_static(
         user: &str, 
         config: &ProxyConfig, 

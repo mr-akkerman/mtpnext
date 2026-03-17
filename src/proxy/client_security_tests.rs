@@ -1,10 +1,278 @@
 use super::*;
 use crate::config::{UpstreamConfig, UpstreamType};
+use crate::crypto::AesCtr;
 use crate::crypto::sha256_hmac;
+use crate::protocol::constants::ProtoTag;
 use crate::protocol::tls;
+use crate::proxy::handshake::HandshakeSuccess;
 use crate::transport::proxy_protocol::ProxyProtocolV1Builder;
+use crate::stream::{CryptoReader, CryptoWriter};
 use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+
+#[test]
+fn synthetic_local_addr_uses_configured_port_for_zero() {
+    let addr = synthetic_local_addr(0);
+    assert_eq!(addr.ip(), IpAddr::from([0, 0, 0, 0]));
+    assert_eq!(addr.port(), 0);
+}
+
+#[test]
+fn synthetic_local_addr_uses_configured_port_for_max() {
+    let addr = synthetic_local_addr(u16::MAX);
+    assert_eq!(addr.ip(), IpAddr::from([0, 0, 0, 0]));
+    assert_eq!(addr.port(), u16::MAX);
+}
+
+fn make_crypto_reader<R>(reader: R) -> CryptoReader<R>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let key = [0u8; 32];
+    let iv = 0u128;
+    CryptoReader::new(reader, AesCtr::new(&key, iv))
+}
+
+fn make_crypto_writer<W>(writer: W) -> CryptoWriter<W>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    let key = [0u8; 32];
+    let iv = 0u128;
+    CryptoWriter::new(writer, AesCtr::new(&key, iv), 8 * 1024)
+}
+
+#[tokio::test]
+async fn relay_task_abort_releases_user_gate_and_ip_reservation() {
+    let tg_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let tg_addr = tg_listener.local_addr().unwrap();
+
+    let tg_accept_task = tokio::spawn(async move {
+        let (stream, _) = tg_listener.accept().await.unwrap();
+        let _hold_stream = stream;
+        tokio::time::sleep(Duration::from_secs(60)).await;
+    });
+
+    let user = "abort-user";
+    let peer_addr: SocketAddr = "198.51.100.230:50000".parse().unwrap();
+
+    let stats = Arc::new(Stats::new());
+    let ip_tracker = Arc::new(UserIpTracker::new());
+
+    let mut cfg = ProxyConfig::default();
+    cfg.access.user_max_tcp_conns.insert(user.to_string(), 8);
+    cfg.dc_overrides
+        .insert("2".to_string(), vec![tg_addr.to_string()]);
+    let config = Arc::new(cfg);
+
+    let upstream_manager = Arc::new(UpstreamManager::new(
+        vec![UpstreamConfig {
+            upstream_type: UpstreamType::Direct {
+                interface: None,
+                bind_addresses: None,
+            },
+            weight: 1,
+            enabled: true,
+            scopes: String::new(),
+            selected_scope: String::new(),
+        }],
+        1,
+        1,
+        1,
+        1,
+        false,
+        stats.clone(),
+    ));
+
+    let buffer_pool = Arc::new(BufferPool::new());
+    let rng = Arc::new(SecureRandom::new());
+    let route_runtime = Arc::new(RouteRuntimeController::new(RelayRouteMode::Direct));
+
+    let (server_side, client_side) = duplex(64 * 1024);
+    let (server_reader, server_writer) = tokio::io::split(server_side);
+    let client_reader = make_crypto_reader(server_reader);
+    let client_writer = make_crypto_writer(server_writer);
+
+    let success = HandshakeSuccess {
+        user: user.to_string(),
+        dc_idx: 2,
+        proto_tag: ProtoTag::Intermediate,
+        dec_key: [0u8; 32],
+        dec_iv: 0,
+        enc_key: [0u8; 32],
+        enc_iv: 0,
+        peer: peer_addr,
+        is_tls: false,
+    };
+
+    let relay_task = tokio::spawn(RunningClientHandler::handle_authenticated_static(
+        client_reader,
+        client_writer,
+        success,
+        upstream_manager,
+        stats.clone(),
+        config,
+        buffer_pool,
+        rng,
+        None,
+        route_runtime,
+        "127.0.0.1:443".parse().unwrap(),
+        peer_addr,
+        ip_tracker.clone(),
+    ));
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if stats.get_user_curr_connects(user) == 1
+                && ip_tracker.get_active_ip_count(user).await == 1
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("relay must reserve user slot and IP before abort");
+
+    relay_task.abort();
+    let joined = relay_task.await;
+    assert!(joined.is_err(), "aborted relay task must return join error");
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        stats.get_user_curr_connects(user),
+        0,
+        "task abort must release user current-connection slot"
+    );
+    assert_eq!(
+        ip_tracker.get_active_ip_count(user).await,
+        0,
+        "task abort must release reserved user IP footprint"
+    );
+
+    drop(client_side);
+    tg_accept_task.abort();
+    let _ = tg_accept_task.await;
+}
+
+#[tokio::test]
+async fn relay_cutover_releases_user_gate_and_ip_reservation() {
+    let tg_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let tg_addr = tg_listener.local_addr().unwrap();
+
+    let tg_accept_task = tokio::spawn(async move {
+        let (stream, _) = tg_listener.accept().await.unwrap();
+        let _hold_stream = stream;
+        tokio::time::sleep(Duration::from_secs(60)).await;
+    });
+
+    let user = "cutover-user";
+    let peer_addr: SocketAddr = "198.51.100.231:50001".parse().unwrap();
+
+    let stats = Arc::new(Stats::new());
+    let ip_tracker = Arc::new(UserIpTracker::new());
+
+    let mut cfg = ProxyConfig::default();
+    cfg.access.user_max_tcp_conns.insert(user.to_string(), 8);
+    cfg.dc_overrides
+        .insert("2".to_string(), vec![tg_addr.to_string()]);
+    let config = Arc::new(cfg);
+
+    let upstream_manager = Arc::new(UpstreamManager::new(
+        vec![UpstreamConfig {
+            upstream_type: UpstreamType::Direct {
+                interface: None,
+                bind_addresses: None,
+            },
+            weight: 1,
+            enabled: true,
+            scopes: String::new(),
+            selected_scope: String::new(),
+        }],
+        1,
+        1,
+        1,
+        1,
+        false,
+        stats.clone(),
+    ));
+
+    let buffer_pool = Arc::new(BufferPool::new());
+    let rng = Arc::new(SecureRandom::new());
+    let route_runtime = Arc::new(RouteRuntimeController::new(RelayRouteMode::Direct));
+
+    let (server_side, client_side) = duplex(64 * 1024);
+    let (server_reader, server_writer) = tokio::io::split(server_side);
+    let client_reader = make_crypto_reader(server_reader);
+    let client_writer = make_crypto_writer(server_writer);
+
+    let success = HandshakeSuccess {
+        user: user.to_string(),
+        dc_idx: 2,
+        proto_tag: ProtoTag::Intermediate,
+        dec_key: [0u8; 32],
+        dec_iv: 0,
+        enc_key: [0u8; 32],
+        enc_iv: 0,
+        peer: peer_addr,
+        is_tls: false,
+    };
+
+    let relay_task = tokio::spawn(RunningClientHandler::handle_authenticated_static(
+        client_reader,
+        client_writer,
+        success,
+        upstream_manager,
+        stats.clone(),
+        config,
+        buffer_pool,
+        rng,
+        None,
+        route_runtime.clone(),
+        "127.0.0.1:443".parse().unwrap(),
+        peer_addr,
+        ip_tracker.clone(),
+    ));
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if stats.get_user_curr_connects(user) == 1
+                && ip_tracker.get_active_ip_count(user).await == 1
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("relay must reserve user slot and IP before cutover");
+
+    assert!(
+        route_runtime.set_mode(RelayRouteMode::Middle).is_some(),
+        "cutover must advance route generation"
+    );
+
+    let relay_result = tokio::time::timeout(Duration::from_secs(6), relay_task)
+        .await
+        .expect("relay must terminate after cutover")
+        .expect("relay task must not panic");
+    assert!(relay_result.is_err(), "cutover must terminate direct relay session");
+
+    assert_eq!(
+        stats.get_user_curr_connects(user),
+        0,
+        "cutover exit must release user current-connection slot"
+    );
+    assert_eq!(
+        ip_tracker.get_active_ip_count(user).await,
+        0,
+        "cutover exit must release reserved user IP footprint"
+    );
+
+    drop(client_side);
+    tg_accept_task.abort();
+    let _ = tg_accept_task.await;
+}
 
 #[tokio::test]
 async fn short_tls_probe_is_masked_through_client_pipeline() {

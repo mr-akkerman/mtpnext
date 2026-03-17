@@ -942,3 +942,80 @@ async fn middle_relay_abort_midflight_releases_route_gauge() {
 
     drop(client_side);
 }
+
+#[tokio::test]
+async fn middle_relay_cutover_midflight_releases_route_gauge() {
+    let stats = Arc::new(Stats::new());
+    let me_pool = make_me_pool_for_abort_test(stats.clone()).await;
+    let config = Arc::new(ProxyConfig::default());
+    let buffer_pool = Arc::new(BufferPool::new());
+    let rng = Arc::new(SecureRandom::new());
+
+    let route_runtime = Arc::new(RouteRuntimeController::new(RelayRouteMode::Middle));
+    let route_snapshot = route_runtime.snapshot();
+
+    let (server_side, client_side) = duplex(64 * 1024);
+    let (server_reader, server_writer) = tokio::io::split(server_side);
+    let crypto_reader = make_crypto_reader(server_reader);
+    let crypto_writer = make_crypto_writer(server_writer);
+
+    let success = HandshakeSuccess {
+        user: "cutover-middle-user".to_string(),
+        dc_idx: 2,
+        proto_tag: ProtoTag::Intermediate,
+        dec_key: [0u8; 32],
+        dec_iv: 0,
+        enc_key: [0u8; 32],
+        enc_iv: 0,
+        peer: "127.0.0.1:50003".parse().unwrap(),
+        is_tls: false,
+    };
+
+    let relay_task = tokio::spawn(handle_via_middle_proxy(
+        crypto_reader,
+        crypto_writer,
+        success,
+        me_pool,
+        stats.clone(),
+        config,
+        buffer_pool,
+        "127.0.0.1:443".parse().unwrap(),
+        rng,
+        route_runtime.subscribe(),
+        route_snapshot,
+        0xfeed_beef,
+    ));
+
+    tokio::time::timeout(TokioDuration::from_secs(2), async {
+        loop {
+            if stats.get_current_connections_me() == 1 {
+                break;
+            }
+            tokio::time::sleep(TokioDuration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("middle relay must increment route gauge before cutover");
+
+    assert!(
+        route_runtime.set_mode(RelayRouteMode::Direct).is_some(),
+        "cutover must advance route generation"
+    );
+
+    let relay_result = tokio::time::timeout(TokioDuration::from_secs(6), relay_task)
+        .await
+        .expect("middle relay must terminate after cutover")
+        .expect("middle relay task must not panic");
+    assert!(
+        relay_result.is_err(),
+        "cutover should terminate middle relay session"
+    );
+
+    assert_eq!(
+        stats.get_current_connections_me(),
+        0,
+        "route gauge must be released when middle relay exits on cutover"
+    );
+
+    drop(client_side);
+}
