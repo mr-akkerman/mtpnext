@@ -105,7 +105,7 @@ where
     debug!(peer = %success.peer, "TG handshake complete, starting relay");
 
     stats.increment_user_connects(user);
-    stats.increment_current_connections_direct();
+    let _direct_connection_lease = stats.acquire_direct_connection_lease();
 
     let relay_result = relay_bidirectional(
         client_reader,
@@ -147,8 +147,6 @@ where
             }
         }
     };
-
-    stats.decrement_current_connections_direct();
 
     match &relay_result {
         Ok(()) => debug!(user = %user, "Direct relay completed"),

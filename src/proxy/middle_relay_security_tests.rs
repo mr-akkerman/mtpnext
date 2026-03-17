@@ -2,8 +2,13 @@ use super::*;
 use bytes::Bytes;
 use crate::crypto::AesCtr;
 use crate::crypto::SecureRandom;
+use crate::config::{GeneralConfig, MeRouteNoWriterMode, MeSocksKdfPolicy, MeWriterPickMode};
+use crate::network::probe::NetworkDecision;
+use crate::proxy::route_mode::{RelayRouteMode, RouteRuntimeController};
 use crate::stats::Stats;
 use crate::stream::{BufferPool, CryptoReader, CryptoWriter, PooledBuffer};
+use crate::transport::middle_proxy::MePool;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -229,16 +234,106 @@ fn make_forensics_state() -> RelayForensicsState {
     }
 }
 
-fn make_crypto_reader(reader: tokio::io::DuplexStream) -> CryptoReader<tokio::io::DuplexStream> {
+fn make_crypto_reader<R>(reader: R) -> CryptoReader<R>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
     let key = [0u8; 32];
     let iv = 0u128;
     CryptoReader::new(reader, AesCtr::new(&key, iv))
 }
 
-fn make_crypto_writer(writer: tokio::io::DuplexStream) -> CryptoWriter<tokio::io::DuplexStream> {
+fn make_crypto_writer<W>(writer: W) -> CryptoWriter<W>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
     let key = [0u8; 32];
     let iv = 0u128;
     CryptoWriter::new(writer, AesCtr::new(&key, iv), 8 * 1024)
+}
+
+async fn make_me_pool_for_abort_test(stats: Arc<Stats>) -> Arc<MePool> {
+    let general = GeneralConfig::default();
+
+    MePool::new(
+        None,
+        vec![1u8; 32],
+        None,
+        false,
+        None,
+        Vec::new(),
+        1,
+        None,
+        12,
+        1200,
+        HashMap::new(),
+        HashMap::new(),
+        None,
+        NetworkDecision::default(),
+        None,
+        Arc::new(SecureRandom::new()),
+        stats,
+        general.me_keepalive_enabled,
+        general.me_keepalive_interval_secs,
+        general.me_keepalive_jitter_secs,
+        general.me_keepalive_payload_random,
+        general.rpc_proxy_req_every,
+        general.me_warmup_stagger_enabled,
+        general.me_warmup_step_delay_ms,
+        general.me_warmup_step_jitter_ms,
+        general.me_reconnect_max_concurrent_per_dc,
+        general.me_reconnect_backoff_base_ms,
+        general.me_reconnect_backoff_cap_ms,
+        general.me_reconnect_fast_retry_count,
+        general.me_single_endpoint_shadow_writers,
+        general.me_single_endpoint_outage_mode_enabled,
+        general.me_single_endpoint_outage_disable_quarantine,
+        general.me_single_endpoint_outage_backoff_min_ms,
+        general.me_single_endpoint_outage_backoff_max_ms,
+        general.me_single_endpoint_shadow_rotate_every_secs,
+        general.me_floor_mode,
+        general.me_adaptive_floor_idle_secs,
+        general.me_adaptive_floor_min_writers_single_endpoint,
+        general.me_adaptive_floor_min_writers_multi_endpoint,
+        general.me_adaptive_floor_recover_grace_secs,
+        general.me_adaptive_floor_writers_per_core_total,
+        general.me_adaptive_floor_cpu_cores_override,
+        general.me_adaptive_floor_max_extra_writers_single_per_core,
+        general.me_adaptive_floor_max_extra_writers_multi_per_core,
+        general.me_adaptive_floor_max_active_writers_per_core,
+        general.me_adaptive_floor_max_warm_writers_per_core,
+        general.me_adaptive_floor_max_active_writers_global,
+        general.me_adaptive_floor_max_warm_writers_global,
+        general.hardswap,
+        general.me_pool_drain_ttl_secs,
+        general.me_pool_drain_threshold,
+        general.effective_me_pool_force_close_secs(),
+        general.me_pool_min_fresh_ratio,
+        general.me_hardswap_warmup_delay_min_ms,
+        general.me_hardswap_warmup_delay_max_ms,
+        general.me_hardswap_warmup_extra_passes,
+        general.me_hardswap_warmup_pass_backoff_base_ms,
+        general.me_bind_stale_mode,
+        general.me_bind_stale_ttl_secs,
+        general.me_secret_atomic_snapshot,
+        general.me_deterministic_writer_sort,
+        MeWriterPickMode::default(),
+        general.me_writer_pick_sample_size,
+        MeSocksKdfPolicy::default(),
+        general.me_writer_cmd_channel_capacity,
+        general.me_route_channel_capacity,
+        general.me_route_backpressure_base_timeout_ms,
+        general.me_route_backpressure_high_timeout_ms,
+        general.me_route_backpressure_high_watermark_pct,
+        general.me_reader_route_data_wait_ms,
+        general.me_health_interval_ms_unhealthy,
+        general.me_health_interval_ms_healthy,
+        general.me_warn_rate_limit_ms,
+        MeRouteNoWriterMode::default(),
+        general.me_route_no_writer_wait_ms,
+        general.me_route_inline_recovery_attempts,
+        general.me_route_inline_recovery_wait_ms,
+    )
 }
 
 fn encrypt_for_reader(plaintext: &[u8]) -> Vec<u8> {
@@ -778,4 +873,72 @@ async fn process_me_writer_response_data_updates_byte_accounting() {
         payload.len() as u64,
         "ME->C byte accounting must increase by emitted payload size"
     );
+}
+
+#[tokio::test]
+async fn middle_relay_abort_midflight_releases_route_gauge() {
+    let stats = Arc::new(Stats::new());
+    let me_pool = make_me_pool_for_abort_test(stats.clone()).await;
+    let config = Arc::new(ProxyConfig::default());
+    let buffer_pool = Arc::new(BufferPool::new());
+    let rng = Arc::new(SecureRandom::new());
+
+    let route_runtime = Arc::new(RouteRuntimeController::new(RelayRouteMode::Middle));
+    let route_snapshot = route_runtime.snapshot();
+
+    let (server_side, client_side) = duplex(64 * 1024);
+    let (server_reader, server_writer) = tokio::io::split(server_side);
+    let crypto_reader = make_crypto_reader(server_reader);
+    let crypto_writer = make_crypto_writer(server_writer);
+
+    let success = HandshakeSuccess {
+        user: "abort-middle-user".to_string(),
+        dc_idx: 2,
+        proto_tag: ProtoTag::Intermediate,
+        dec_key: [0u8; 32],
+        dec_iv: 0,
+        enc_key: [0u8; 32],
+        enc_iv: 0,
+        peer: "127.0.0.1:50001".parse().unwrap(),
+        is_tls: false,
+    };
+
+    let relay_task = tokio::spawn(handle_via_middle_proxy(
+        crypto_reader,
+        crypto_writer,
+        success,
+        me_pool,
+        stats.clone(),
+        config,
+        buffer_pool,
+        "127.0.0.1:443".parse().unwrap(),
+        rng,
+        route_runtime.subscribe(),
+        route_snapshot,
+        0xdecafbad,
+    ));
+
+    let started = tokio::time::timeout(TokioDuration::from_secs(2), async {
+        loop {
+            if stats.get_current_connections_me() == 1 {
+                break;
+            }
+            tokio::time::sleep(TokioDuration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(started.is_ok(), "middle relay must increment route gauge before abort");
+
+    relay_task.abort();
+    let joined = relay_task.await;
+    assert!(joined.is_err(), "aborted middle relay task must return join error");
+
+    tokio::time::sleep(TokioDuration::from_millis(20)).await;
+    assert_eq!(
+        stats.get_current_connections_me(),
+        0,
+        "route gauge must be released when middle relay task is aborted mid-flight"
+    );
+
+    drop(client_side);
 }

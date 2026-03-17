@@ -306,7 +306,7 @@ where
     };
 
     stats.increment_user_connects(&user);
-    stats.increment_current_connections_me();
+    let _me_connection_lease = stats.acquire_me_connection_lease();
 
     if let Some(cutover) = affected_cutover_state(
         &route_rx,
@@ -324,7 +324,6 @@ where
         tokio::time::sleep(delay).await;
         let _ = me_pool.send_close(conn_id).await;
         me_pool.registry().unregister(conn_id).await;
-        stats.decrement_current_connections_me();
         return Err(ProxyError::Proxy(ROUTE_SWITCH_ERROR_MSG.to_string()));
     }
 
@@ -672,7 +671,6 @@ where
         "ME relay cleanup"
     );
     me_pool.registry().unregister(conn_id).await;
-    stats.decrement_current_connections_me();
     result
 }
 

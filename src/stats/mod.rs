@@ -6,6 +6,7 @@ pub mod beobachten;
 pub mod telemetry;
 
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use dashmap::DashMap;
 use parking_lot::Mutex;
@@ -18,6 +19,45 @@ use tracing::debug;
 
 use crate::config::{MeTelemetryLevel, MeWriterPickMode};
 use self::telemetry::TelemetryPolicy;
+
+#[derive(Clone, Copy)]
+enum RouteConnectionGauge {
+    Direct,
+    Middle,
+}
+
+pub struct RouteConnectionLease {
+    stats: Arc<Stats>,
+    gauge: RouteConnectionGauge,
+    active: bool,
+}
+
+impl RouteConnectionLease {
+    fn new(stats: Arc<Stats>, gauge: RouteConnectionGauge) -> Self {
+        Self {
+            stats,
+            gauge,
+            active: true,
+        }
+    }
+
+    #[cfg(test)]
+    fn disarm(&mut self) {
+        self.active = false;
+    }
+}
+
+impl Drop for RouteConnectionLease {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        match self.gauge {
+            RouteConnectionGauge::Direct => self.stats.decrement_current_connections_direct(),
+            RouteConnectionGauge::Middle => self.stats.decrement_current_connections_me(),
+        }
+    }
+}
 
 // ============= Stats =============
 
@@ -284,6 +324,16 @@ impl Stats {
     }
     pub fn decrement_current_connections_me(&self) {
         Self::decrement_atomic_saturating(&self.current_connections_me);
+    }
+
+    pub fn acquire_direct_connection_lease(self: &Arc<Self>) -> RouteConnectionLease {
+        self.increment_current_connections_direct();
+        RouteConnectionLease::new(self.clone(), RouteConnectionGauge::Direct)
+    }
+
+    pub fn acquire_me_connection_lease(self: &Arc<Self>) -> RouteConnectionLease {
+        self.increment_current_connections_me();
+        RouteConnectionLease::new(self.clone(), RouteConnectionGauge::Middle)
     }
     pub fn increment_handshake_timeouts(&self) {
         if self.telemetry_core_enabled() {
@@ -1772,3 +1822,7 @@ mod tests {
         assert_eq!(checker.stats().total_entries, 500);
     }
 }
+
+#[cfg(test)]
+#[path = "connection_lease_security_tests.rs"]
+mod connection_lease_security_tests;
