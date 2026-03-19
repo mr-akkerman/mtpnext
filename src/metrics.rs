@@ -292,109 +292,6 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
         "telemt_connections_bad_total {}",
         if core_enabled { stats.get_connects_bad() } else { 0 }
     );
-    let _ = writeln!(out, "# HELP telemt_connections_current Current active connections");
-    let _ = writeln!(out, "# TYPE telemt_connections_current gauge");
-    let _ = writeln!(
-        out,
-        "telemt_connections_current {}",
-        if core_enabled {
-            stats.get_current_connections_total()
-        } else {
-            0
-        }
-    );
-    let _ = writeln!(out, "# HELP telemt_connections_direct_current Current active direct connections");
-    let _ = writeln!(out, "# TYPE telemt_connections_direct_current gauge");
-    let _ = writeln!(
-        out,
-        "telemt_connections_direct_current {}",
-        if core_enabled {
-            stats.get_current_connections_direct()
-        } else {
-            0
-        }
-    );
-    let _ = writeln!(out, "# HELP telemt_connections_me_current Current active middle-end connections");
-    let _ = writeln!(out, "# TYPE telemt_connections_me_current gauge");
-    let _ = writeln!(
-        out,
-        "telemt_connections_me_current {}",
-        if core_enabled {
-            stats.get_current_connections_me()
-        } else {
-            0
-        }
-    );
-    let _ = writeln!(
-        out,
-        "# HELP telemt_relay_adaptive_promotions_total Adaptive relay tier promotions"
-    );
-    let _ = writeln!(out, "# TYPE telemt_relay_adaptive_promotions_total counter");
-    let _ = writeln!(
-        out,
-        "telemt_relay_adaptive_promotions_total {}",
-        if core_enabled {
-            stats.get_relay_adaptive_promotions_total()
-        } else {
-            0
-        }
-    );
-    let _ = writeln!(
-        out,
-        "# HELP telemt_relay_adaptive_demotions_total Adaptive relay tier demotions"
-    );
-    let _ = writeln!(out, "# TYPE telemt_relay_adaptive_demotions_total counter");
-    let _ = writeln!(
-        out,
-        "telemt_relay_adaptive_demotions_total {}",
-        if core_enabled {
-            stats.get_relay_adaptive_demotions_total()
-        } else {
-            0
-        }
-    );
-    let _ = writeln!(
-        out,
-        "# HELP telemt_relay_adaptive_hard_promotions_total Adaptive relay hard promotions triggered by write pressure"
-    );
-    let _ = writeln!(
-        out,
-        "# TYPE telemt_relay_adaptive_hard_promotions_total counter"
-    );
-    let _ = writeln!(
-        out,
-        "telemt_relay_adaptive_hard_promotions_total {}",
-        if core_enabled {
-            stats.get_relay_adaptive_hard_promotions_total()
-        } else {
-            0
-        }
-    );
-    let _ = writeln!(out, "# HELP telemt_reconnect_evict_total Reconnect-driven session evictions");
-    let _ = writeln!(out, "# TYPE telemt_reconnect_evict_total counter");
-    let _ = writeln!(
-        out,
-        "telemt_reconnect_evict_total {}",
-        if core_enabled {
-            stats.get_reconnect_evict_total()
-        } else {
-            0
-        }
-    );
-    let _ = writeln!(
-        out,
-        "# HELP telemt_reconnect_stale_close_total Sessions closed because they became stale after reconnect"
-    );
-    let _ = writeln!(out, "# TYPE telemt_reconnect_stale_close_total counter");
-    let _ = writeln!(
-        out,
-        "telemt_reconnect_stale_close_total {}",
-        if core_enabled {
-            stats.get_reconnect_stale_close_total()
-        } else {
-            0
-        }
-    );
 
     let _ = writeln!(out, "# HELP telemt_handshake_timeouts_total Handshake timeouts");
     let _ = writeln!(out, "# TYPE telemt_handshake_timeouts_total counter");
@@ -1650,36 +1547,6 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
         }
     );
 
-    let _ = writeln!(
-        out,
-        "# HELP telemt_pool_drain_soft_evict_total Soft-evicted client sessions on stuck draining writers"
-    );
-    let _ = writeln!(out, "# TYPE telemt_pool_drain_soft_evict_total counter");
-    let _ = writeln!(
-        out,
-        "telemt_pool_drain_soft_evict_total {}",
-        if me_allows_normal {
-            stats.get_pool_drain_soft_evict_total()
-        } else {
-            0
-        }
-    );
-
-    let _ = writeln!(
-        out,
-        "# HELP telemt_pool_drain_soft_evict_writer_total Draining writers with at least one soft eviction"
-    );
-    let _ = writeln!(out, "# TYPE telemt_pool_drain_soft_evict_writer_total counter");
-    let _ = writeln!(
-        out,
-        "telemt_pool_drain_soft_evict_writer_total {}",
-        if me_allows_normal {
-            stats.get_pool_drain_soft_evict_writer_total()
-        } else {
-            0
-        }
-    );
-
     let _ = writeln!(out, "# HELP telemt_pool_stale_pick_total Stale writer fallback picks for new binds");
     let _ = writeln!(out, "# TYPE telemt_pool_stale_pick_total counter");
     let _ = writeln!(
@@ -1687,57 +1554,6 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
         "telemt_pool_stale_pick_total {}",
         if me_allows_normal {
             stats.get_pool_stale_pick_total()
-        } else {
-            0
-        }
-    );
-
-    let _ = writeln!(
-        out,
-        "# HELP telemt_me_writer_close_signal_drop_total Close-signal drops for already-removed ME writers"
-    );
-    let _ = writeln!(out, "# TYPE telemt_me_writer_close_signal_drop_total counter");
-    let _ = writeln!(
-        out,
-        "telemt_me_writer_close_signal_drop_total {}",
-        if me_allows_normal {
-            stats.get_me_writer_close_signal_drop_total()
-        } else {
-            0
-        }
-    );
-
-    let _ = writeln!(
-        out,
-        "# HELP telemt_me_writer_close_signal_channel_full_total Close-signal drops caused by full writer command channels"
-    );
-    let _ = writeln!(
-        out,
-        "# TYPE telemt_me_writer_close_signal_channel_full_total counter"
-    );
-    let _ = writeln!(
-        out,
-        "telemt_me_writer_close_signal_channel_full_total {}",
-        if me_allows_normal {
-            stats.get_me_writer_close_signal_channel_full_total()
-        } else {
-            0
-        }
-    );
-
-    let _ = writeln!(
-        out,
-        "# HELP telemt_me_draining_writers_reap_progress_total Draining-writer removals processed by reap cleanup"
-    );
-    let _ = writeln!(
-        out,
-        "# TYPE telemt_me_draining_writers_reap_progress_total counter"
-    );
-    let _ = writeln!(
-        out,
-        "telemt_me_draining_writers_reap_progress_total {}",
-        if me_allows_normal {
-            stats.get_me_draining_writers_reap_progress_total()
         } else {
             0
         }
@@ -2048,8 +1864,6 @@ mod tests {
         stats.increment_connects_all();
         stats.increment_connects_all();
         stats.increment_connects_bad();
-        stats.increment_current_connections_direct();
-        stats.increment_current_connections_me();
         stats.increment_handshake_timeouts();
         stats.increment_upstream_connect_attempt_total();
         stats.increment_upstream_connect_attempt_total();
@@ -2081,9 +1895,6 @@ mod tests {
 
         assert!(output.contains("telemt_connections_total 2"));
         assert!(output.contains("telemt_connections_bad_total 1"));
-        assert!(output.contains("telemt_connections_current 2"));
-        assert!(output.contains("telemt_connections_direct_current 1"));
-        assert!(output.contains("telemt_connections_me_current 1"));
         assert!(output.contains("telemt_handshake_timeouts_total 1"));
         assert!(output.contains("telemt_upstream_connect_attempt_total 2"));
         assert!(output.contains("telemt_upstream_connect_success_total 1"));
@@ -2126,9 +1937,6 @@ mod tests {
         let output = render_metrics(&stats, &config, &tracker).await;
         assert!(output.contains("telemt_connections_total 0"));
         assert!(output.contains("telemt_connections_bad_total 0"));
-        assert!(output.contains("telemt_connections_current 0"));
-        assert!(output.contains("telemt_connections_direct_current 0"));
-        assert!(output.contains("telemt_connections_me_current 0"));
         assert!(output.contains("telemt_handshake_timeouts_total 0"));
         assert!(output.contains("telemt_user_unique_ips_current{user="));
         assert!(output.contains("telemt_user_unique_ips_recent_window{user="));
@@ -2162,28 +1970,11 @@ mod tests {
         assert!(output.contains("# TYPE telemt_uptime_seconds gauge"));
         assert!(output.contains("# TYPE telemt_connections_total counter"));
         assert!(output.contains("# TYPE telemt_connections_bad_total counter"));
-        assert!(output.contains("# TYPE telemt_connections_current gauge"));
-        assert!(output.contains("# TYPE telemt_connections_direct_current gauge"));
-        assert!(output.contains("# TYPE telemt_connections_me_current gauge"));
-        assert!(output.contains("# TYPE telemt_relay_adaptive_promotions_total counter"));
-        assert!(output.contains("# TYPE telemt_relay_adaptive_demotions_total counter"));
-        assert!(output.contains("# TYPE telemt_relay_adaptive_hard_promotions_total counter"));
-        assert!(output.contains("# TYPE telemt_reconnect_evict_total counter"));
-        assert!(output.contains("# TYPE telemt_reconnect_stale_close_total counter"));
         assert!(output.contains("# TYPE telemt_handshake_timeouts_total counter"));
         assert!(output.contains("# TYPE telemt_upstream_connect_attempt_total counter"));
         assert!(output.contains("# TYPE telemt_me_rpc_proxy_req_signal_sent_total counter"));
         assert!(output.contains("# TYPE telemt_me_idle_close_by_peer_total counter"));
         assert!(output.contains("# TYPE telemt_me_writer_removed_total counter"));
-        assert!(output.contains("# TYPE telemt_me_writer_close_signal_drop_total counter"));
-        assert!(output.contains(
-            "# TYPE telemt_me_writer_close_signal_channel_full_total counter"
-        ));
-        assert!(output.contains(
-            "# TYPE telemt_me_draining_writers_reap_progress_total counter"
-        ));
-        assert!(output.contains("# TYPE telemt_pool_drain_soft_evict_total counter"));
-        assert!(output.contains("# TYPE telemt_pool_drain_soft_evict_writer_total counter"));
         assert!(output.contains(
             "# TYPE telemt_me_writer_removed_unexpected_minus_restored_total gauge"
         ));

@@ -84,7 +84,6 @@ use crate::proxy::handshake::{HandshakeSuccess, handle_mtproto_handshake, handle
 use crate::proxy::masking::handle_bad_client;
 use crate::proxy::middle_relay::handle_via_middle_proxy;
 use crate::proxy::route_mode::{RelayRouteMode, RouteRuntimeController};
-use crate::proxy::session_eviction::register_session;
 
 fn beobachten_ttl(config: &ProxyConfig) -> Duration {
     let minutes = config.general.beobachten_minutes;
@@ -867,17 +866,6 @@ impl RunningClientHandler {
                 }
             };
 
-        let registration = register_session(&user, success.dc_idx);
-        if registration.replaced_existing {
-            stats.increment_reconnect_evict_total();
-            warn!(
-                user = %user,
-                dc = success.dc_idx,
-                "Reconnect detected: replacing active session for user+dc"
-            );
-        }
-        let session_lease = registration.lease;
-
         let route_snapshot = route_runtime.snapshot();
         let session_id = rng.u64();
         let relay_result = if config.general.use_middle_proxy
@@ -897,7 +885,6 @@ impl RunningClientHandler {
                     route_runtime.subscribe(),
                     route_snapshot,
                     session_id,
-                    session_lease.clone(),
                 )
                 .await
             } else {
@@ -914,7 +901,6 @@ impl RunningClientHandler {
                     route_runtime.subscribe(),
                     route_snapshot,
                     session_id,
-                    session_lease.clone(),
                 )
                 .await
             }
@@ -932,7 +918,6 @@ impl RunningClientHandler {
                 route_runtime.subscribe(),
                 route_snapshot,
                 session_id,
-                session_lease.clone(),
             )
             .await
         };
