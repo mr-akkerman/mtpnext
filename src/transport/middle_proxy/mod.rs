@@ -29,6 +29,10 @@ mod health_integration_tests;
 mod health_adversarial_tests;
 #[cfg(test)]
 mod send_adversarial_tests;
+#[cfg(test)]
+mod pool_writer_security_tests;
+#[cfg(test)]
+mod pool_refill_security_tests;
 
 use bytes::Bytes;
 
