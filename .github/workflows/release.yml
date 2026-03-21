@@ -36,24 +36,34 @@ jobs:
           # ===== MUSL =====
           - target: x86_64-unknown-linux-musl
             asset_name: telemt-x86_64-linux-musl
-          - target: aarch64-unknown-linux-musl
-            asset_name: telemt-aarch64-linux-musl
 
     steps:
       - uses: actions/checkout@v4
 
+      # ---------- Toolchain ----------
       - uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: stable
-          targets: ${{ matrix.target }}
+          targets: |
+            x86_64-unknown-linux-gnu
+            aarch64-unknown-linux-gnu
+            x86_64-unknown-linux-musl
 
-      - name: Pull cross images
+      # ---------- System deps (bookworm) ----------
+      - name: Install build deps
         run: |
-          docker pull ghcr.io/cross-rs/${{ matrix.target }}:latest || true
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            clang \
+            lld \
+            pkg-config \
+            musl-tools \
+            gcc-aarch64-linux-gnu \
+            g++-aarch64-linux-gnu \
+            ca-certificates
 
-      - name: Install cross
-        run: cargo install cross --git https://github.com/cross-rs/cross
-
+      # ---------- Cache ----------
       - uses: actions/cache@v4
         with:
           path: |
@@ -61,21 +71,35 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ matrix.target }}-
 
+      # ---------- Build ----------
       - name: Build
         env:
-          RUSTFLAGS: ${{ contains(matrix.target, 'musl') && '-C target-feature=+crt-static' || '' }}
-        run: cross build --release --target ${{ matrix.target }}
+          CC_x86_64_unknown_linux_gnu: clang
+          CXX_x86_64_unknown_linux_gnu: clang++
 
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
+
+          CC_x86_64_unknown_linux_musl: musl-gcc
+
+          RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=lld"
+        run: |
+          case "${{ matrix.target }}" in
+            x86_64-unknown-linux-musl)
+              export RUSTFLAGS="-C target-feature=+crt-static"
+              ;;
+          esac
+
+          cargo build --release --target ${{ matrix.target }}
+
+      # ---------- Package ----------
       - name: Package
         run: |
           mkdir -p dist
 
           BIN=target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}
 
-          # уникальное имя бинаря
           cp "$BIN" dist/${{ env.BINARY_NAME }}-${{ matrix.target }}
 
           cd dist
@@ -133,19 +157,6 @@ jobs:
           tags: |
             ghcr.io/${{ github.repository }}:${{ steps.vars.outputs.VERSION }}
             ghcr.io/${{ github.repository }}:latest
-          build-args: |
-            BINARY=dist/telemt
-
-      - name: Build & Push debug
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          target: debug
-          push: true
-          platforms: linux/amd64,linux/arm64
-          tags: |
-            ghcr.io/${{ github.repository }}:${{ steps.vars.outputs.VERSION }}-debug
-            ghcr.io/${{ github.repository }}:debug
           build-args: |
             BINARY=dist/telemt
 
