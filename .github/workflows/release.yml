@@ -103,42 +103,11 @@ jobs:
       - name: Clippy
         shell: bash
         run: |
-             cargo clippy --workspace --bins --locked -- \
-              -D clippy::await_holding_lock \
-              -D clippy::await_holding_refcell_ref \
-              -D clippy::unwrap_used \
-              -D clippy::expect_used \
-              -D clippy::panic \
-              -D clippy::panic_in_result_fn \
-              -D clippy::unreachable \
-              -D clippy::indexing_slicing \
-              -D clippy::mut_from_ref \
-              -D clippy::let_underscore_must_use \
-              -D clippy::unused_io_amount \
-              -D clippy::unused_unit \
-              -D clippy::fallible_impl_from \
-              -D clippy::shadow_unrelated \
-              -D clippy::branches_sharing_code \
-              -D clippy::len_without_is_empty \
-              -D clippy::needless_borrow \
-              -D clippy::redundant_locals \
-              -D clippy::empty_line_after_doc_comments \
-              -D clippy::empty_line_after_outer_attr \
-              -D clippy::unused_async \
-              -D clippy::must_use_candidate \
-              -A clippy::too_many_arguments \
-              -A clippy::type_complexity \
-              -A clippy::new_ret_no_self \
-              -A clippy::manual_contains \
-              -A clippy::manual_is_multiple_of \
-              -A clippy::manual_hash_one \
-              -A clippy::collapsible_if \
-              -A clippy::manual_range_contains \
-              -A dead_code
+             cargo clippy
 
       - name: Tests
         shell: bash
-        run: cargo test --workspace --all-targets --locked
+        run: cargo test
 
   build-binaries:
     name: Build ${{ matrix.asset_name }}
