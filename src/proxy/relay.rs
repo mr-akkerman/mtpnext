@@ -263,11 +263,46 @@ fn is_quota_io_error(err: &io::Error) -> bool {
 }
 
 static QUOTA_USER_LOCKS: OnceLock<DashMap<String, Arc<Mutex<()>>>> = OnceLock::new();
+static QUOTA_USER_OVERFLOW_LOCKS: OnceLock<Vec<Arc<Mutex<()>>>> = OnceLock::new();
+
+#[cfg(test)]
+const QUOTA_USER_LOCKS_MAX: usize = 64;
+#[cfg(not(test))]
+const QUOTA_USER_LOCKS_MAX: usize = 4_096;
+#[cfg(test)]
+const QUOTA_OVERFLOW_LOCK_STRIPES: usize = 16;
+#[cfg(not(test))]
+const QUOTA_OVERFLOW_LOCK_STRIPES: usize = 256;
+
+#[cfg(test)]
+fn quota_user_lock_test_guard() -> &'static Mutex<()> {
+    static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    TEST_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn quota_overflow_user_lock(user: &str) -> Arc<Mutex<()>> {
+    let stripes = QUOTA_USER_OVERFLOW_LOCKS.get_or_init(|| {
+        (0..QUOTA_OVERFLOW_LOCK_STRIPES)
+            .map(|_| Arc::new(Mutex::new(())))
+            .collect()
+    });
+
+    let hash = crc32fast::hash(user.as_bytes()) as usize;
+    Arc::clone(&stripes[hash % stripes.len()])
+}
 
 fn quota_user_lock(user: &str) -> Arc<Mutex<()>> {
     let locks = QUOTA_USER_LOCKS.get_or_init(DashMap::new);
     if let Some(existing) = locks.get(user) {
         return Arc::clone(existing.value());
+    }
+
+    if locks.len() >= QUOTA_USER_LOCKS_MAX {
+        locks.retain(|_, value| Arc::strong_count(value) > 1);
+    }
+
+    if locks.len() >= QUOTA_USER_LOCKS_MAX {
+        return quota_overflow_user_lock(user);
     }
 
     let created = Arc::new(Mutex::new(()));
@@ -663,3 +698,7 @@ mod security_tests;
 #[cfg(test)]
 #[path = "tests/relay_adversarial_tests.rs"]
 mod adversarial_tests;
+
+#[cfg(test)]
+#[path = "tests/relay_quota_lock_pressure_adversarial_tests.rs"]
+mod relay_quota_lock_pressure_adversarial_tests;

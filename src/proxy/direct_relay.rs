@@ -27,6 +27,10 @@ use crate::transport::UpstreamManager;
 
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
+#[cfg(unix)]
+use std::os::unix::io::{AsRawFd, FromRawFd};
 
 const UNKNOWN_DC_LOG_DISTINCT_LIMIT: usize = 1024;
 static LOGGED_UNKNOWN_DCS: OnceLock<Mutex<HashSet<i16>>> = OnceLock::new();
@@ -136,6 +140,7 @@ fn unknown_dc_log_path_is_still_safe(path: &SanitizedUnknownDcLogPath) -> bool {
     true
 }
 
+#[cfg(test)]
 fn open_unknown_dc_log_append(path: &Path) -> std::io::Result<std::fs::File> {
     #[cfg(unix)]
     {
@@ -152,6 +157,64 @@ fn open_unknown_dc_log_append(path: &Path) -> std::io::Result<std::fs::File> {
             std::io::ErrorKind::PermissionDenied,
             "unknown_dc_file_log_enabled requires unix O_NOFOLLOW support",
         ))
+    }
+}
+
+fn open_unknown_dc_log_append_anchored(path: &SanitizedUnknownDcLogPath) -> std::io::Result<std::fs::File> {
+    #[cfg(unix)]
+    {
+        let parent = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&path.allowed_parent)?;
+
+        let file_name = std::ffi::CString::new(path.file_name.as_os_str().as_bytes())
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "unknown DC log file name contains NUL byte"))?;
+
+        let fd = unsafe {
+            libc::openat(
+                parent.as_raw_fd(),
+                file_name.as_ptr(),
+                libc::O_CREAT | libc::O_APPEND | libc::O_WRONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                0o600,
+            )
+        };
+
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+
+        let file = unsafe { std::fs::File::from_raw_fd(fd) };
+        Ok(file)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "unknown_dc_file_log_enabled requires unix O_NOFOLLOW support",
+        ))
+    }
+}
+
+fn append_unknown_dc_line(file: &mut std::fs::File, dc_idx: i16) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+
+        let write_result = writeln!(file, "dc_idx={dc_idx}");
+
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+
+        write_result
+    }
+    #[cfg(not(unix))]
+    {
+        writeln!(file, "dc_idx={dc_idx}")
     }
 }
 
@@ -321,9 +384,9 @@ fn get_dc_addr_static(dc_idx: i16, config: &ProxyConfig) -> Result<SocketAddr> {
                 if should_log_unknown_dc(dc_idx) {
                     handle.spawn_blocking(move || {
                         if unknown_dc_log_path_is_still_safe(&path)
-                            && let Ok(mut file) = open_unknown_dc_log_append(&path.resolved_path)
+                            && let Ok(mut file) = open_unknown_dc_log_append_anchored(&path)
                         {
-                            let _ = writeln!(file, "dc_idx={dc_idx}");
+                            let _ = append_unknown_dc_line(&mut file, dc_idx);
                         }
                     });
                 }
@@ -394,3 +457,15 @@ where
 #[cfg(test)]
 #[path = "tests/direct_relay_security_tests.rs"]
 mod security_tests;
+
+#[cfg(test)]
+#[path = "tests/direct_relay_business_logic_tests.rs"]
+mod business_logic_tests;
+
+#[cfg(test)]
+#[path = "tests/direct_relay_common_mistakes_tests.rs"]
+mod common_mistakes_tests;
+
+#[cfg(test)]
+#[path = "tests/direct_relay_subtle_adversarial_tests.rs"]
+mod subtle_adversarial_tests;

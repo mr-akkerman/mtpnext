@@ -588,12 +588,21 @@ pub fn extract_sni_from_client_hello(handshake: &[u8]) -> Option<String> {
         return None;
     }
 
+    let mut saw_sni_extension = false;
+    let mut extracted_sni = None;
+
     while pos + 4 <= ext_end {
         let etype = u16::from_be_bytes([handshake[pos], handshake[pos + 1]]);
         let elen = u16::from_be_bytes([handshake[pos + 2], handshake[pos + 3]]) as usize;
         pos += 4;
         if pos + elen > ext_end {
             break;
+        }
+        if etype == 0x0000 {
+            if saw_sni_extension {
+                return None;
+            }
+            saw_sni_extension = true;
         }
         if etype == 0x0000 && elen >= 5 {
             // server_name extension
@@ -611,7 +620,8 @@ pub fn extract_sni_from_client_hello(handshake: &[u8]) -> Option<String> {
                     && let Ok(host) = std::str::from_utf8(&handshake[sn_pos..sn_pos + name_len])
                 {
                     if is_valid_sni_hostname(host) {
-                        return Some(host.to_string());
+                        extracted_sni = Some(host.to_string());
+                        break;
                     }
                 }
                 sn_pos += name_len;
@@ -620,7 +630,7 @@ pub fn extract_sni_from_client_hello(handshake: &[u8]) -> Option<String> {
         pos += elen;
     }
 
-    None
+    extracted_sni
 }
 
 fn is_valid_sni_hostname(host: &str) -> bool {

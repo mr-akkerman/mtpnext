@@ -667,6 +667,56 @@ fn adversarial_check_then_symlink_flip_is_blocked_by_nofollow_open() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn adversarial_parent_swap_after_check_is_blocked_by_anchored_open() {
+    use std::os::unix::fs::symlink;
+
+    let base = std::env::current_dir()
+        .expect("cwd must be available")
+        .join("target")
+        .join(format!("telemt-unknown-dc-parent-swap-openat-{}", std::process::id()));
+    fs::create_dir_all(&base).expect("parent-swap-openat base must be creatable");
+
+    let rel_candidate = format!(
+        "target/telemt-unknown-dc-parent-swap-openat-{}/unknown-dc.log",
+        std::process::id()
+    );
+    let sanitized = sanitize_unknown_dc_log_path(&rel_candidate)
+        .expect("candidate must sanitize before parent swap");
+    fs::write(&sanitized.resolved_path, "seed\n").expect("seed target file must be writable");
+
+    assert!(
+        unknown_dc_log_path_is_still_safe(&sanitized),
+        "precondition: target should initially pass revalidation"
+    );
+
+    let outside_parent = std::env::temp_dir().join(format!(
+        "telemt-unknown-dc-parent-swap-openat-outside-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&outside_parent).expect("outside parent directory must be creatable");
+    let outside_target = outside_parent.join("unknown-dc.log");
+    let _ = fs::remove_file(&outside_target);
+
+    let moved = base.with_extension("bak");
+    let _ = fs::remove_dir_all(&moved);
+    fs::rename(&base, &moved).expect("base parent must be movable for swap simulation");
+    symlink(&outside_parent, &base).expect("base parent symlink replacement must be creatable");
+
+    let err = open_unknown_dc_log_append_anchored(&sanitized)
+        .expect_err("anchored open must fail when parent is swapped to symlink");
+    let raw = err.raw_os_error();
+    assert!(
+        matches!(raw, Some(libc::ELOOP) | Some(libc::ENOTDIR) | Some(libc::ENOENT)),
+        "anchored open must fail closed on parent swap race, got raw_os_error={raw:?}"
+    );
+    assert!(
+        !outside_target.exists(),
+        "anchored open must never create a log file in swapped outside parent"
+    );
+}
+
 #[tokio::test]
 async fn unknown_dc_absolute_log_path_writes_one_entry() {
     let _guard = unknown_dc_test_lock()

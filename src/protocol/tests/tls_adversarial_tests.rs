@@ -307,9 +307,8 @@ fn extract_sni_with_duplicate_extensions_rejected() {
     h.extend_from_slice(&(handshake.len() as u16).to_be_bytes());
     h.extend_from_slice(&handshake);
     
-    // Parser might return first, see second, or fail. OWASP ASVS prefers rejection of unexpected dups.
-    // Telemt's `extract_sni` returns the first one found.
-    assert!(extract_sni_from_client_hello(&h).is_some()); 
+    // Duplicate SNI extensions are ambiguous and must fail closed.
+    assert!(extract_sni_from_client_hello(&h).is_none());
 }
 
 #[test]

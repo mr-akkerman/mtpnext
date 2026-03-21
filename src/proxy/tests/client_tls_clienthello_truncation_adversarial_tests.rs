@@ -249,7 +249,7 @@ async fn run_blackhat_client_handler_fragmented_probe_should_mask(
 }
 
 #[tokio::test]
-async fn blackhat_truncated_in_range_clienthello_generic_stream_should_mask_but_leaks() {
+async fn blackhat_truncated_in_range_clienthello_generic_stream_should_mask() {
     let mask_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let mask_addr = mask_listener.local_addr().unwrap();
     let backend_reply = b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_vec();
@@ -309,7 +309,7 @@ async fn blackhat_truncated_in_range_clienthello_generic_stream_should_mask_but_
     client_side.shutdown().await.unwrap();
 
     // Security expectation: even malformed in-range TLS should be masked.
-    // Current code leaks by returning EOF/timeout instead of masking.
+    // This invariant must hold to avoid probe-distinguishable EOF/timeout behavior.
     let mut observed = vec![0u8; backend_reply.len()];
     tokio::time::timeout(Duration::from_secs(2), client_side.read_exact(&mut observed))
         .await
@@ -329,7 +329,7 @@ async fn blackhat_truncated_in_range_clienthello_generic_stream_should_mask_but_
 }
 
 #[tokio::test]
-async fn blackhat_truncated_in_range_clienthello_client_handler_should_mask_but_leaks() {
+async fn blackhat_truncated_in_range_clienthello_client_handler_should_mask() {
     let mask_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let mask_addr = mask_listener.local_addr().unwrap();
 
@@ -429,7 +429,7 @@ async fn blackhat_truncated_in_range_clienthello_client_handler_should_mask_but_
 }
 
 #[tokio::test]
-async fn blackhat_generic_truncated_min_body_1_should_mask_but_leaks() {
+async fn blackhat_generic_truncated_min_body_1_should_mask() {
     run_blackhat_generic_fragmented_probe_should_mask(
         truncated_in_range_record(1),
         &[6],
@@ -440,7 +440,7 @@ async fn blackhat_generic_truncated_min_body_1_should_mask_but_leaks() {
 }
 
 #[tokio::test]
-async fn blackhat_generic_truncated_min_body_8_should_mask_but_leaks() {
+async fn blackhat_generic_truncated_min_body_8_should_mask() {
     run_blackhat_generic_fragmented_probe_should_mask(
         truncated_in_range_record(8),
         &[13],
@@ -451,7 +451,7 @@ async fn blackhat_generic_truncated_min_body_8_should_mask_but_leaks() {
 }
 
 #[tokio::test]
-async fn blackhat_generic_truncated_min_body_99_should_mask_but_leaks() {
+async fn blackhat_generic_truncated_min_body_99_should_mask() {
     run_blackhat_generic_fragmented_probe_should_mask(
         truncated_in_range_record(MIN_TLS_CLIENT_HELLO_SIZE - 1),
         &[5, MIN_TLS_CLIENT_HELLO_SIZE - 1],
@@ -462,7 +462,7 @@ async fn blackhat_generic_truncated_min_body_99_should_mask_but_leaks() {
 }
 
 #[tokio::test]
-async fn blackhat_generic_fragmented_header_then_close_should_mask_but_leaks() {
+async fn blackhat_generic_fragmented_header_then_close_should_mask() {
     run_blackhat_generic_fragmented_probe_should_mask(
         truncated_in_range_record(0),
         &[1, 1, 1, 1, 1],
@@ -473,7 +473,7 @@ async fn blackhat_generic_fragmented_header_then_close_should_mask_but_leaks() {
 }
 
 #[tokio::test]
-async fn blackhat_generic_fragmented_header_plus_partial_body_should_mask_but_leaks() {
+async fn blackhat_generic_fragmented_header_plus_partial_body_should_mask() {
     run_blackhat_generic_fragmented_probe_should_mask(
         truncated_in_range_record(5),
         &[1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
@@ -495,7 +495,7 @@ async fn blackhat_generic_slowloris_fragmented_min_probe_should_mask_but_times_o
 }
 
 #[tokio::test]
-async fn blackhat_client_handler_truncated_min_body_1_should_mask_but_leaks() {
+async fn blackhat_client_handler_truncated_min_body_1_should_mask() {
     run_blackhat_client_handler_fragmented_probe_should_mask(
         truncated_in_range_record(1),
         &[6],
@@ -506,7 +506,7 @@ async fn blackhat_client_handler_truncated_min_body_1_should_mask_but_leaks() {
 }
 
 #[tokio::test]
-async fn blackhat_client_handler_truncated_min_body_8_should_mask_but_leaks() {
+async fn blackhat_client_handler_truncated_min_body_8_should_mask() {
     run_blackhat_client_handler_fragmented_probe_should_mask(
         truncated_in_range_record(8),
         &[13],
@@ -517,7 +517,7 @@ async fn blackhat_client_handler_truncated_min_body_8_should_mask_but_leaks() {
 }
 
 #[tokio::test]
-async fn blackhat_client_handler_truncated_min_body_99_should_mask_but_leaks() {
+async fn blackhat_client_handler_truncated_min_body_99_should_mask() {
     run_blackhat_client_handler_fragmented_probe_should_mask(
         truncated_in_range_record(MIN_TLS_CLIENT_HELLO_SIZE - 1),
         &[5, MIN_TLS_CLIENT_HELLO_SIZE - 1],
@@ -528,7 +528,7 @@ async fn blackhat_client_handler_truncated_min_body_99_should_mask_but_leaks() {
 }
 
 #[tokio::test]
-async fn blackhat_client_handler_fragmented_header_then_close_should_mask_but_leaks() {
+async fn blackhat_client_handler_fragmented_header_then_close_should_mask() {
     run_blackhat_client_handler_fragmented_probe_should_mask(
         truncated_in_range_record(0),
         &[1, 1, 1, 1, 1],
@@ -539,7 +539,7 @@ async fn blackhat_client_handler_fragmented_header_then_close_should_mask_but_le
 }
 
 #[tokio::test]
-async fn blackhat_client_handler_fragmented_header_plus_partial_body_should_mask_but_leaks() {
+async fn blackhat_client_handler_fragmented_header_plus_partial_body_should_mask() {
     run_blackhat_client_handler_fragmented_probe_should_mask(
         truncated_in_range_record(5),
         &[1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
