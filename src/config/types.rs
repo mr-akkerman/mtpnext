@@ -468,7 +468,7 @@ pub struct GeneralConfig {
     pub me_c2me_send_timeout_ms: u64,
 
     /// Bounded wait in milliseconds for routing ME DATA to per-connection queue.
-    /// `0` keeps legacy no-wait behavior.
+    /// `0` keeps non-blocking routing; values >0 enable bounded wait for compatibility.
     #[serde(default = "default_me_reader_route_data_wait_ms")]
     pub me_reader_route_data_wait_ms: u64,
 
@@ -488,6 +488,14 @@ pub struct GeneralConfig {
     /// Flush client writer immediately after quick-ack write.
     #[serde(default = "default_me_d2c_ack_flush_immediate")]
     pub me_d2c_ack_flush_immediate: bool,
+
+    /// Additional bytes above strict per-user quota allowed in hot-path soft mode.
+    #[serde(default = "default_me_quota_soft_overshoot_bytes")]
+    pub me_quota_soft_overshoot_bytes: u64,
+
+    /// Shrink threshold for reusable ME->Client frame assembly buffer.
+    #[serde(default = "default_me_d2c_frame_buf_shrink_threshold_bytes")]
+    pub me_d2c_frame_buf_shrink_threshold_bytes: usize,
 
     /// Copy buffer size for client->DC direction in direct relay.
     #[serde(default = "default_direct_relay_copy_buf_c2s_bytes")]
@@ -945,6 +953,8 @@ impl Default for GeneralConfig {
             me_d2c_flush_batch_max_bytes: default_me_d2c_flush_batch_max_bytes(),
             me_d2c_flush_batch_max_delay_us: default_me_d2c_flush_batch_max_delay_us(),
             me_d2c_ack_flush_immediate: default_me_d2c_ack_flush_immediate(),
+            me_quota_soft_overshoot_bytes: default_me_quota_soft_overshoot_bytes(),
+            me_d2c_frame_buf_shrink_threshold_bytes: default_me_d2c_frame_buf_shrink_threshold_bytes(),
             direct_relay_copy_buf_c2s_bytes: default_direct_relay_copy_buf_c2s_bytes(),
             direct_relay_copy_buf_s2c_bytes: default_direct_relay_copy_buf_s2c_bytes(),
             me_warmup_stagger_enabled: default_true(),

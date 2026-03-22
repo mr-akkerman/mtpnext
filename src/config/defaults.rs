@@ -29,6 +29,8 @@ const DEFAULT_ME_D2C_FLUSH_BATCH_MAX_FRAMES: usize = 32;
 const DEFAULT_ME_D2C_FLUSH_BATCH_MAX_BYTES: usize = 128 * 1024;
 const DEFAULT_ME_D2C_FLUSH_BATCH_MAX_DELAY_US: u64 = 500;
 const DEFAULT_ME_D2C_ACK_FLUSH_IMMEDIATE: bool = true;
+const DEFAULT_ME_QUOTA_SOFT_OVERSHOOT_BYTES: u64 = 64 * 1024;
+const DEFAULT_ME_D2C_FRAME_BUF_SHRINK_THRESHOLD_BYTES: usize = 256 * 1024;
 const DEFAULT_DIRECT_RELAY_COPY_BUF_C2S_BYTES: usize = 64 * 1024;
 const DEFAULT_DIRECT_RELAY_COPY_BUF_S2C_BYTES: usize = 256 * 1024;
 const DEFAULT_ME_WRITER_PICK_SAMPLE_SIZE: u8 = 3;
@@ -385,6 +387,14 @@ pub(crate) fn default_me_d2c_flush_batch_max_delay_us() -> u64 {
 
 pub(crate) fn default_me_d2c_ack_flush_immediate() -> bool {
     DEFAULT_ME_D2C_ACK_FLUSH_IMMEDIATE
+}
+
+pub(crate) fn default_me_quota_soft_overshoot_bytes() -> u64 {
+    DEFAULT_ME_QUOTA_SOFT_OVERSHOOT_BYTES
+}
+
+pub(crate) fn default_me_d2c_frame_buf_shrink_threshold_bytes() -> usize {
+    DEFAULT_ME_D2C_FRAME_BUF_SHRINK_THRESHOLD_BYTES
 }
 
 pub(crate) fn default_direct_relay_copy_buf_c2s_bytes() -> usize {

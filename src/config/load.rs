@@ -533,6 +533,19 @@ impl ProxyConfig {
             ));
         }
 
+        if config.general.me_quota_soft_overshoot_bytes > 16 * 1024 * 1024 {
+            return Err(ProxyError::Config(
+                "general.me_quota_soft_overshoot_bytes must be within [0, 16777216]".to_string(),
+            ));
+        }
+
+        if !(4096..=16 * 1024 * 1024).contains(&config.general.me_d2c_frame_buf_shrink_threshold_bytes) {
+            return Err(ProxyError::Config(
+                "general.me_d2c_frame_buf_shrink_threshold_bytes must be within [4096, 16777216]"
+                    .to_string(),
+            ));
+        }
+
         if !(4096..=1024 * 1024).contains(&config.general.direct_relay_copy_buf_c2s_bytes) {
             return Err(ProxyError::Config(
                 "general.direct_relay_copy_buf_c2s_bytes must be within [4096, 1048576]"

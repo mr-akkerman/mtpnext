@@ -45,6 +45,8 @@ const C2ME_SEND_TIMEOUT: Duration = Duration::from_millis(50);
 const C2ME_SEND_TIMEOUT: Duration = Duration::from_secs(5);
 const ME_D2C_FLUSH_BATCH_MAX_FRAMES_MIN: usize = 1;
 const ME_D2C_FLUSH_BATCH_MAX_BYTES_MIN: usize = 4096;
+const ME_D2C_FRAME_BUF_SHRINK_HYSTERESIS_FACTOR: usize = 2;
+const ME_D2C_SINGLE_WRITE_COALESCE_MAX_BYTES: usize = 128 * 1024;
 #[cfg(test)]
 const QUOTA_USER_LOCKS_MAX: usize = 64;
 #[cfg(not(test))]
@@ -214,6 +216,8 @@ struct MeD2cFlushPolicy {
     max_bytes: usize,
     max_delay: Duration,
     ack_flush_immediate: bool,
+    quota_soft_overshoot_bytes: u64,
+    frame_buf_shrink_threshold_bytes: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -284,6 +288,11 @@ impl MeD2cFlushPolicy {
                 .max(ME_D2C_FLUSH_BATCH_MAX_BYTES_MIN),
             max_delay: Duration::from_micros(config.general.me_d2c_flush_batch_max_delay_us),
             ack_flush_immediate: config.general.me_d2c_ack_flush_immediate,
+            quota_soft_overshoot_bytes: config.general.me_quota_soft_overshoot_bytes,
+            frame_buf_shrink_threshold_bytes: config
+                .general
+                .me_d2c_frame_buf_shrink_threshold_bytes
+                .max(4096),
         }
     }
 }
@@ -538,6 +547,33 @@ fn quota_would_be_exceeded_for_user(
     })
 }
 
+fn quota_soft_cap(limit: u64, overshoot: u64) -> u64 {
+    limit.saturating_add(overshoot)
+}
+
+fn quota_exceeded_for_user_soft(
+    stats: &Stats,
+    user: &str,
+    quota_limit: Option<u64>,
+    overshoot: u64,
+) -> bool {
+    quota_limit.is_some_and(|quota| stats.get_user_total_octets(user) >= quota_soft_cap(quota, overshoot))
+}
+
+fn quota_would_be_exceeded_for_user_soft(
+    stats: &Stats,
+    user: &str,
+    quota_limit: Option<u64>,
+    bytes: u64,
+    overshoot: u64,
+) -> bool {
+    quota_limit.is_some_and(|quota| {
+        let cap = quota_soft_cap(quota, overshoot);
+        let used = stats.get_user_total_octets(user);
+        used >= cap || bytes > cap.saturating_sub(used)
+    })
+}
+
 #[cfg(test)]
 fn quota_user_lock_test_guard() -> &'static Mutex<()> {
     static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -786,6 +822,7 @@ where
                         stats_clone.as_ref(),
                         &user_clone,
                         quota_limit,
+                        d2c_flush_policy.quota_soft_overshoot_bytes,
                         bytes_me2c_clone.as_ref(),
                         conn_id,
                         d2c_flush_policy.ack_flush_immediate,
@@ -825,6 +862,7 @@ where
                             stats_clone.as_ref(),
                             &user_clone,
                             quota_limit,
+                            d2c_flush_policy.quota_soft_overshoot_bytes,
                             bytes_me2c_clone.as_ref(),
                             conn_id,
                             d2c_flush_policy.ack_flush_immediate,
@@ -864,6 +902,7 @@ where
                                     stats_clone.as_ref(),
                                     &user_clone,
                                     quota_limit,
+                                    d2c_flush_policy.quota_soft_overshoot_bytes,
                                     bytes_me2c_clone.as_ref(),
                                     conn_id,
                                     d2c_flush_policy.ack_flush_immediate,
@@ -903,6 +942,7 @@ where
                                         stats_clone.as_ref(),
                                         &user_clone,
                                         quota_limit,
+                                        d2c_flush_policy.quota_soft_overshoot_bytes,
                                         bytes_me2c_clone.as_ref(),
                                         conn_id,
                                         d2c_flush_policy.ack_flush_immediate,
@@ -933,6 +973,12 @@ where
                     }
 
                     writer.flush().await.map_err(ProxyError::Io)?;
+                    let shrink_threshold = d2c_flush_policy.frame_buf_shrink_threshold_bytes;
+                    let shrink_trigger = shrink_threshold
+                        .saturating_mul(ME_D2C_FRAME_BUF_SHRINK_HYSTERESIS_FACTOR);
+                    if frame_buf.capacity() > shrink_trigger {
+                        frame_buf.shrink_to(shrink_threshold);
+                    }
                 }
                 _ = &mut stop_rx => {
                     debug!(conn_id, "ME writer stop signal");
@@ -1482,6 +1528,7 @@ async fn process_me_writer_response<W>(
     stats: &Stats,
     user: &str,
     quota_limit: Option<u64>,
+    quota_soft_overshoot_bytes: u64,
     bytes_me2c: &AtomicU64,
     conn_id: u64,
     ack_flush_immediate: bool,
@@ -1498,31 +1545,32 @@ where
                 trace!(conn_id, bytes = data.len(), flags, "ME->C data");
             }
             let data_len = data.len() as u64;
-            if let Some(limit) = quota_limit {
-                let quota_lock = quota_user_lock(user);
-                let _quota_guard = quota_lock.lock().await;
-                if quota_would_be_exceeded_for_user(stats, user, Some(limit), data_len) {
-                    return Err(ProxyError::DataQuotaExceeded {
-                        user: user.to_string(),
-                    });
-                }
-                write_client_payload(client_writer, proto_tag, flags, &data, rng, frame_buf)
-                    .await?;
+            if quota_would_be_exceeded_for_user_soft(
+                stats,
+                user,
+                quota_limit,
+                data_len,
+                quota_soft_overshoot_bytes,
+            ) {
+                return Err(ProxyError::DataQuotaExceeded {
+                    user: user.to_string(),
+                });
+            }
 
-                bytes_me2c.fetch_add(data.len() as u64, Ordering::Relaxed);
-                stats.add_user_octets_to(user, data.len() as u64);
+            write_client_payload(client_writer, proto_tag, flags, &data, rng, frame_buf).await?;
 
-                if quota_exceeded_for_user(stats, user, Some(limit)) {
-                    return Err(ProxyError::DataQuotaExceeded {
-                        user: user.to_string(),
-                    });
-                }
-            } else {
-                write_client_payload(client_writer, proto_tag, flags, &data, rng, frame_buf)
-                    .await?;
+            bytes_me2c.fetch_add(data.len() as u64, Ordering::Relaxed);
+            stats.add_user_octets_to(user, data.len() as u64);
 
-                bytes_me2c.fetch_add(data.len() as u64, Ordering::Relaxed);
-                stats.add_user_octets_to(user, data.len() as u64);
+            if quota_exceeded_for_user_soft(
+                stats,
+                user,
+                quota_limit,
+                quota_soft_overshoot_bytes,
+            ) {
+                return Err(ProxyError::DataQuotaExceeded {
+                    user: user.to_string(),
+                });
             }
 
             Ok(MeWriterResponseOutcome::Continue {
@@ -1609,28 +1657,42 @@ where
                 if quickack {
                     first |= 0x80;
                 }
-                frame_buf.clear();
-                frame_buf.reserve(1 + data.len());
-                frame_buf.push(first);
-                frame_buf.extend_from_slice(data);
-                client_writer
-                    .write_all(frame_buf)
-                    .await
-                    .map_err(ProxyError::Io)?;
+                let wire_len = 1usize.saturating_add(data.len());
+                if wire_len <= ME_D2C_SINGLE_WRITE_COALESCE_MAX_BYTES {
+                    frame_buf.clear();
+                    frame_buf.reserve(wire_len);
+                    frame_buf.push(first);
+                    frame_buf.extend_from_slice(data);
+                    client_writer
+                        .write_all(frame_buf.as_slice())
+                        .await
+                        .map_err(ProxyError::Io)?;
+                } else {
+                    let header = [first];
+                    client_writer.write_all(&header).await.map_err(ProxyError::Io)?;
+                    client_writer.write_all(data).await.map_err(ProxyError::Io)?;
+                }
             } else if len_words < (1 << 24) {
                 let mut first = 0x7fu8;
                 if quickack {
                     first |= 0x80;
                 }
                 let lw = (len_words as u32).to_le_bytes();
-                frame_buf.clear();
-                frame_buf.reserve(4 + data.len());
-                frame_buf.extend_from_slice(&[first, lw[0], lw[1], lw[2]]);
-                frame_buf.extend_from_slice(data);
-                client_writer
-                    .write_all(frame_buf)
-                    .await
-                    .map_err(ProxyError::Io)?;
+                let wire_len = 4usize.saturating_add(data.len());
+                if wire_len <= ME_D2C_SINGLE_WRITE_COALESCE_MAX_BYTES {
+                    frame_buf.clear();
+                    frame_buf.reserve(wire_len);
+                    frame_buf.extend_from_slice(&[first, lw[0], lw[1], lw[2]]);
+                    frame_buf.extend_from_slice(data);
+                    client_writer
+                        .write_all(frame_buf.as_slice())
+                        .await
+                        .map_err(ProxyError::Io)?;
+                } else {
+                    let header = [first, lw[0], lw[1], lw[2]];
+                    client_writer.write_all(&header).await.map_err(ProxyError::Io)?;
+                    client_writer.write_all(data).await.map_err(ProxyError::Io)?;
+                }
             } else {
                 return Err(ProxyError::Proxy(format!(
                     "Abridged frame too large: {}",
@@ -1650,21 +1712,40 @@ where
             } else {
                 0
             };
+
             let (len_val, total) =
                 compute_intermediate_secure_wire_len(data.len(), padding_len, quickack)?;
-            frame_buf.clear();
-            frame_buf.reserve(total);
-            frame_buf.extend_from_slice(&len_val.to_le_bytes());
-            frame_buf.extend_from_slice(data);
-            if padding_len > 0 {
-                let start = frame_buf.len();
-                frame_buf.resize(start + padding_len, 0);
-                rng.fill(&mut frame_buf[start..]);
+            if total <= ME_D2C_SINGLE_WRITE_COALESCE_MAX_BYTES {
+                frame_buf.clear();
+                frame_buf.reserve(total);
+                frame_buf.extend_from_slice(&len_val.to_le_bytes());
+                frame_buf.extend_from_slice(data);
+                if padding_len > 0 {
+                    let start = frame_buf.len();
+                    frame_buf.resize(start + padding_len, 0);
+                    rng.fill(&mut frame_buf[start..]);
+                }
+                client_writer
+                    .write_all(frame_buf.as_slice())
+                    .await
+                    .map_err(ProxyError::Io)?;
+            } else {
+                let header = len_val.to_le_bytes();
+                client_writer.write_all(&header).await.map_err(ProxyError::Io)?;
+                client_writer.write_all(data).await.map_err(ProxyError::Io)?;
+                if padding_len > 0 {
+                    frame_buf.clear();
+                    if frame_buf.capacity() < padding_len {
+                        frame_buf.reserve(padding_len);
+                    }
+                    frame_buf.resize(padding_len, 0);
+                    rng.fill(frame_buf.as_mut_slice());
+                    client_writer
+                        .write_all(frame_buf.as_slice())
+                        .await
+                        .map_err(ProxyError::Io)?;
+                }
             }
-            client_writer
-                .write_all(frame_buf)
-                .await
-                .map_err(ProxyError::Io)?;
         }
     }
 

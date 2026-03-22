@@ -106,6 +106,8 @@ pub struct HotFields {
     pub me_d2c_flush_batch_max_bytes: usize,
     pub me_d2c_flush_batch_max_delay_us: u64,
     pub me_d2c_ack_flush_immediate: bool,
+    pub me_quota_soft_overshoot_bytes: u64,
+    pub me_d2c_frame_buf_shrink_threshold_bytes: usize,
     pub direct_relay_copy_buf_c2s_bytes: usize,
     pub direct_relay_copy_buf_s2c_bytes: usize,
     pub me_health_interval_ms_unhealthy: u64,
@@ -225,6 +227,8 @@ impl HotFields {
             me_d2c_flush_batch_max_bytes: cfg.general.me_d2c_flush_batch_max_bytes,
             me_d2c_flush_batch_max_delay_us: cfg.general.me_d2c_flush_batch_max_delay_us,
             me_d2c_ack_flush_immediate: cfg.general.me_d2c_ack_flush_immediate,
+            me_quota_soft_overshoot_bytes: cfg.general.me_quota_soft_overshoot_bytes,
+            me_d2c_frame_buf_shrink_threshold_bytes: cfg.general.me_d2c_frame_buf_shrink_threshold_bytes,
             direct_relay_copy_buf_c2s_bytes: cfg.general.direct_relay_copy_buf_c2s_bytes,
             direct_relay_copy_buf_s2c_bytes: cfg.general.direct_relay_copy_buf_s2c_bytes,
             me_health_interval_ms_unhealthy: cfg.general.me_health_interval_ms_unhealthy,
@@ -511,6 +515,9 @@ fn overlay_hot_fields(old: &ProxyConfig, new: &ProxyConfig) -> ProxyConfig {
     cfg.general.me_d2c_flush_batch_max_bytes = new.general.me_d2c_flush_batch_max_bytes;
     cfg.general.me_d2c_flush_batch_max_delay_us = new.general.me_d2c_flush_batch_max_delay_us;
     cfg.general.me_d2c_ack_flush_immediate = new.general.me_d2c_ack_flush_immediate;
+    cfg.general.me_quota_soft_overshoot_bytes = new.general.me_quota_soft_overshoot_bytes;
+    cfg.general.me_d2c_frame_buf_shrink_threshold_bytes =
+        new.general.me_d2c_frame_buf_shrink_threshold_bytes;
     cfg.general.direct_relay_copy_buf_c2s_bytes = new.general.direct_relay_copy_buf_c2s_bytes;
     cfg.general.direct_relay_copy_buf_s2c_bytes = new.general.direct_relay_copy_buf_s2c_bytes;
     cfg.general.me_health_interval_ms_unhealthy = new.general.me_health_interval_ms_unhealthy;
@@ -1030,15 +1037,20 @@ fn log_changes(
         || old_hot.me_d2c_flush_batch_max_bytes != new_hot.me_d2c_flush_batch_max_bytes
         || old_hot.me_d2c_flush_batch_max_delay_us != new_hot.me_d2c_flush_batch_max_delay_us
         || old_hot.me_d2c_ack_flush_immediate != new_hot.me_d2c_ack_flush_immediate
+        || old_hot.me_quota_soft_overshoot_bytes != new_hot.me_quota_soft_overshoot_bytes
+        || old_hot.me_d2c_frame_buf_shrink_threshold_bytes
+            != new_hot.me_d2c_frame_buf_shrink_threshold_bytes
         || old_hot.direct_relay_copy_buf_c2s_bytes != new_hot.direct_relay_copy_buf_c2s_bytes
         || old_hot.direct_relay_copy_buf_s2c_bytes != new_hot.direct_relay_copy_buf_s2c_bytes
     {
         info!(
-            "config reload: relay_tuning: me_d2c_frames={} me_d2c_bytes={} me_d2c_delay_us={} me_ack_flush_immediate={} direct_buf_c2s={} direct_buf_s2c={}",
+            "config reload: relay_tuning: me_d2c_frames={} me_d2c_bytes={} me_d2c_delay_us={} me_ack_flush_immediate={} me_quota_soft_overshoot_bytes={} me_d2c_frame_buf_shrink_threshold_bytes={} direct_buf_c2s={} direct_buf_s2c={}",
             new_hot.me_d2c_flush_batch_max_frames,
             new_hot.me_d2c_flush_batch_max_bytes,
             new_hot.me_d2c_flush_batch_max_delay_us,
             new_hot.me_d2c_ack_flush_immediate,
+            new_hot.me_quota_soft_overshoot_bytes,
+            new_hot.me_d2c_frame_buf_shrink_threshold_bytes,
             new_hot.direct_relay_copy_buf_c2s_bytes,
             new_hot.direct_relay_copy_buf_s2c_bytes,
         );

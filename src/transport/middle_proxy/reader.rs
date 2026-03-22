@@ -126,14 +126,10 @@ pub(crate) async fn reader_loop(
                 let data = body.slice(12..);
                 trace!(cid, flags, len = data.len(), "RPC_PROXY_ANS");
 
-                let data_wait_ms = reader_route_data_wait_ms.load(Ordering::Relaxed);
-                let routed = if data_wait_ms == 0 {
-                    reg.route_nowait(cid, MeResponse::Data { flags, data })
-                        .await
-                } else {
-                    reg.route_with_timeout(cid, MeResponse::Data { flags, data }, data_wait_ms)
-                        .await
-                };
+                let route_wait_ms = reader_route_data_wait_ms.load(Ordering::Relaxed);
+                let routed = reg
+                    .route_with_timeout(cid, MeResponse::Data { flags, data }, route_wait_ms)
+                    .await;
                 if !matches!(routed, RouteResult::Routed) {
                     match routed {
                         RouteResult::NoConn => stats.increment_me_route_drop_no_conn(),
