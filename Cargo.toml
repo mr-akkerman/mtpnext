@@ -83,4 +83,6 @@ name = "crypto_bench"
 harness = false
 
 [profile.release]
-lto = "thin"
+lto = "fat"
+codegen-units = 1
+
