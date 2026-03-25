@@ -224,7 +224,10 @@ impl MePool {
     pub(crate) async fn api_status_snapshot(&self) -> MeApiStatusSnapshot {
         let now_epoch_secs = Self::now_epoch_secs();
         let active_generation = self.current_generation();
-        let drain_ttl_secs = self.me_pool_drain_ttl_secs.load(Ordering::Relaxed);
+        let drain_ttl_secs = self
+            .drain_runtime
+            .me_pool_drain_ttl_secs
+            .load(Ordering::Relaxed);
 
         let mut endpoints_by_dc = BTreeMap::<i16, BTreeSet<SocketAddr>>::new();
         if self.decision.ipv4_me {
@@ -570,30 +573,43 @@ impl MePool {
             me_reconnect_backoff_base_ms: self.me_reconnect_backoff_base.as_millis() as u64,
             me_reconnect_backoff_cap_ms: self.me_reconnect_backoff_cap.as_millis() as u64,
             me_reconnect_fast_retry_count: self.me_reconnect_fast_retry_count,
-            me_pool_drain_ttl_secs: self.me_pool_drain_ttl_secs.load(Ordering::Relaxed),
-            me_pool_force_close_secs: self.me_pool_force_close_secs.load(Ordering::Relaxed),
+            me_pool_drain_ttl_secs: self
+                .drain_runtime
+                .me_pool_drain_ttl_secs
+                .load(Ordering::Relaxed),
+            me_pool_force_close_secs: self
+                .drain_runtime
+                .me_pool_force_close_secs
+                .load(Ordering::Relaxed),
             me_pool_min_fresh_ratio: Self::permille_to_ratio(
-                self.me_pool_min_fresh_ratio_permille
+                self.drain_runtime
+                    .me_pool_min_fresh_ratio_permille
                     .load(Ordering::Relaxed),
             ),
             me_bind_stale_mode: bind_stale_mode_label(self.bind_stale_mode()),
             me_bind_stale_ttl_secs: self.me_bind_stale_ttl_secs.load(Ordering::Relaxed),
             me_single_endpoint_shadow_writers: self
+                .single_endpoint_runtime
                 .me_single_endpoint_shadow_writers
                 .load(Ordering::Relaxed),
             me_single_endpoint_outage_mode_enabled: self
+                .single_endpoint_runtime
                 .me_single_endpoint_outage_mode_enabled
                 .load(Ordering::Relaxed),
             me_single_endpoint_outage_disable_quarantine: self
+                .single_endpoint_runtime
                 .me_single_endpoint_outage_disable_quarantine
                 .load(Ordering::Relaxed),
             me_single_endpoint_outage_backoff_min_ms: self
+                .single_endpoint_runtime
                 .me_single_endpoint_outage_backoff_min_ms
                 .load(Ordering::Relaxed),
             me_single_endpoint_outage_backoff_max_ms: self
+                .single_endpoint_runtime
                 .me_single_endpoint_outage_backoff_max_ms
                 .load(Ordering::Relaxed),
             me_single_endpoint_shadow_rotate_every_secs: self
+                .single_endpoint_runtime
                 .me_single_endpoint_shadow_rotate_every_secs
                 .load(Ordering::Relaxed),
             me_deterministic_writer_sort: self.me_deterministic_writer_sort.load(Ordering::Relaxed),

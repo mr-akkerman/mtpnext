@@ -137,9 +137,11 @@ pub(super) async fn reap_draining_writers(
     let now_epoch_secs = MePool::now_epoch_secs();
     let now = Instant::now();
     let drain_ttl_secs = pool
+        .drain_runtime
         .me_pool_drain_ttl_secs
         .load(std::sync::atomic::Ordering::Relaxed);
     let drain_threshold = pool
+        .drain_runtime
         .me_pool_drain_threshold
         .load(std::sync::atomic::Ordering::Relaxed);
     let activity = pool.registry.writer_activity_snapshot().await;
@@ -223,7 +225,10 @@ pub(super) async fn reap_draining_writers(
                 endpoint = %writer.addr,
                 generation = writer.generation,
                 drain_ttl_secs,
-                force_close_secs = pool.me_pool_force_close_secs.load(std::sync::atomic::Ordering::Relaxed),
+                force_close_secs = pool
+                    .drain_runtime
+                    .me_pool_force_close_secs
+                    .load(std::sync::atomic::Ordering::Relaxed),
                 allow_drain_fallback = writer.allow_drain_fallback,
                 "ME draining writer remains non-empty past drain TTL"
             );

@@ -449,7 +449,8 @@ impl MePool {
             .map(|w| (w.writer_dc, w.addr))
             .collect();
         let min_ratio = Self::permille_to_ratio(
-            self.me_pool_min_fresh_ratio_permille
+            self.drain_runtime
+                .me_pool_min_fresh_ratio_permille
                 .load(Ordering::Relaxed),
         );
         let (coverage_ratio, missing_dc) =
