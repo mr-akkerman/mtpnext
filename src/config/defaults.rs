@@ -110,7 +110,11 @@ pub(crate) fn default_replay_window_secs() -> u64 {
 }
 
 pub(crate) fn default_handshake_timeout() -> u64 {
-    30
+    60
+}
+
+pub(crate) fn default_client_first_byte_idle_secs() -> u64 {
+    300
 }
 
 pub(crate) fn default_relay_idle_policy_v2_enabled() -> bool {

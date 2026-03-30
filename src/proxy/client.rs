@@ -416,16 +416,68 @@ where
 
     debug!(peer = %real_peer, "New connection (generic stream)");
 
+    let first_byte = if config.timeouts.client_first_byte_idle_secs == 0 {
+        None
+    } else {
+        let idle_timeout = Duration::from_secs(config.timeouts.client_first_byte_idle_secs);
+        let mut first_byte = [0u8; 1];
+        match timeout(idle_timeout, stream.read(&mut first_byte)).await {
+            Ok(Ok(0)) => {
+                debug!(peer = %real_peer, "Connection closed before first client byte");
+                return Ok(());
+            }
+            Ok(Ok(_)) => Some(first_byte[0]),
+            Ok(Err(e))
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::UnexpectedEof
+                        | std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::ConnectionAborted
+                        | std::io::ErrorKind::BrokenPipe
+                        | std::io::ErrorKind::NotConnected
+                ) =>
+            {
+                debug!(
+                    peer = %real_peer,
+                    error = %e,
+                    "Connection closed before first client byte"
+                );
+                return Ok(());
+            }
+            Ok(Err(e)) => {
+                debug!(
+                    peer = %real_peer,
+                    error = %e,
+                    "Failed while waiting for first client byte"
+                );
+                return Err(ProxyError::Io(e));
+            }
+            Err(_) => {
+                debug!(
+                    peer = %real_peer,
+                    idle_secs = config.timeouts.client_first_byte_idle_secs,
+                    "Closing idle pooled connection before first client byte"
+                );
+                return Ok(());
+            }
+        }
+    };
+
     let handshake_timeout = handshake_timeout_with_mask_grace(&config);
     let stats_for_timeout = stats.clone();
     let config_for_timeout = config.clone();
     let beobachten_for_timeout = beobachten.clone();
     let peer_for_timeout = real_peer.ip();
 
-    // Phase 1: handshake (with timeout)
+    // Phase 2: active handshake (with timeout after the first client byte)
     let outcome = match timeout(handshake_timeout, async {
         let mut first_bytes = [0u8; 5];
-        stream.read_exact(&mut first_bytes).await?;
+        if let Some(first_byte) = first_byte {
+            first_bytes[0] = first_byte;
+            stream.read_exact(&mut first_bytes[1..]).await?;
+        } else {
+            stream.read_exact(&mut first_bytes).await?;
+        }
 
         let is_tls = tls::is_tls_handshake(&first_bytes[..3]);
         debug!(peer = %real_peer, is_tls = is_tls, "Handshake type detected");
@@ -736,36 +788,9 @@ impl RunningClientHandler {
             debug!(peer = %peer, error = %e, "Failed to configure client socket");
         }
 
-        let handshake_timeout = handshake_timeout_with_mask_grace(&self.config);
-        let stats = self.stats.clone();
-        let config_for_timeout = self.config.clone();
-        let beobachten_for_timeout = self.beobachten.clone();
-        let peer_for_timeout = peer.ip();
-
-        // Phase 1: handshake (with timeout)
-        let outcome = match timeout(handshake_timeout, self.do_handshake()).await {
-            Ok(Ok(outcome)) => outcome,
-            Ok(Err(e)) => {
-                debug!(peer = %peer, error = %e, "Handshake failed");
-                record_handshake_failure_class(
-                    &beobachten_for_timeout,
-                    &config_for_timeout,
-                    peer_for_timeout,
-                    &e,
-                );
-                return Err(e);
-            }
-            Err(_) => {
-                stats.increment_handshake_timeouts();
-                debug!(peer = %peer, "Handshake timeout");
-                record_beobachten_class(
-                    &beobachten_for_timeout,
-                    &config_for_timeout,
-                    peer_for_timeout,
-                    "other",
-                );
-                return Err(ProxyError::TgHandshakeTimeout);
-            }
+        let outcome = match self.do_handshake().await? {
+            Some(outcome) => outcome,
+            None => return Ok(()),
         };
 
         // Phase 2: relay (WITHOUT handshake timeout — relay has its own activity timeouts)
@@ -774,7 +799,7 @@ impl RunningClientHandler {
         }
     }
 
-    async fn do_handshake(mut self) -> Result<HandshakeOutcome> {
+    async fn do_handshake(mut self) -> Result<Option<HandshakeOutcome>> {
         let mut local_addr = self.stream.local_addr().map_err(ProxyError::Io)?;
 
         if self.proxy_protocol_enabled {
@@ -849,19 +874,107 @@ impl RunningClientHandler {
             }
         }
 
-        let mut first_bytes = [0u8; 5];
-        self.stream.read_exact(&mut first_bytes).await?;
-
-        let is_tls = tls::is_tls_handshake(&first_bytes[..3]);
-        let peer = self.peer;
-
-        debug!(peer = %peer, is_tls = is_tls, "Handshake type detected");
-
-        if is_tls {
-            self.handle_tls_client(first_bytes, local_addr).await
+        let first_byte = if self.config.timeouts.client_first_byte_idle_secs == 0 {
+            None
         } else {
-            self.handle_direct_client(first_bytes, local_addr).await
-        }
+            let idle_timeout = Duration::from_secs(self.config.timeouts.client_first_byte_idle_secs);
+            let mut first_byte = [0u8; 1];
+            match timeout(idle_timeout, self.stream.read(&mut first_byte)).await {
+                Ok(Ok(0)) => {
+                    debug!(peer = %self.peer, "Connection closed before first client byte");
+                    return Ok(None);
+                }
+                Ok(Ok(_)) => Some(first_byte[0]),
+                Ok(Err(e))
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::UnexpectedEof
+                            | std::io::ErrorKind::ConnectionReset
+                            | std::io::ErrorKind::ConnectionAborted
+                            | std::io::ErrorKind::BrokenPipe
+                            | std::io::ErrorKind::NotConnected
+                    ) =>
+                {
+                    debug!(
+                        peer = %self.peer,
+                        error = %e,
+                        "Connection closed before first client byte"
+                    );
+                    return Ok(None);
+                }
+                Ok(Err(e)) => {
+                    debug!(
+                        peer = %self.peer,
+                        error = %e,
+                        "Failed while waiting for first client byte"
+                    );
+                    return Err(ProxyError::Io(e));
+                }
+                Err(_) => {
+                    debug!(
+                        peer = %self.peer,
+                        idle_secs = self.config.timeouts.client_first_byte_idle_secs,
+                        "Closing idle pooled connection before first client byte"
+                    );
+                    return Ok(None);
+                }
+            }
+        };
+
+        let handshake_timeout = handshake_timeout_with_mask_grace(&self.config);
+        let stats = self.stats.clone();
+        let config_for_timeout = self.config.clone();
+        let beobachten_for_timeout = self.beobachten.clone();
+        let peer_for_timeout = self.peer.ip();
+        let peer_for_log = self.peer;
+
+        let outcome = match timeout(handshake_timeout, async {
+            let mut first_bytes = [0u8; 5];
+            if let Some(first_byte) = first_byte {
+                first_bytes[0] = first_byte;
+                self.stream.read_exact(&mut first_bytes[1..]).await?;
+            } else {
+                self.stream.read_exact(&mut first_bytes).await?;
+            }
+
+            let is_tls = tls::is_tls_handshake(&first_bytes[..3]);
+            let peer = self.peer;
+
+            debug!(peer = %peer, is_tls = is_tls, "Handshake type detected");
+
+            if is_tls {
+                self.handle_tls_client(first_bytes, local_addr).await
+            } else {
+                self.handle_direct_client(first_bytes, local_addr).await
+            }
+        })
+        .await
+        {
+            Ok(Ok(outcome)) => outcome,
+            Ok(Err(e)) => {
+                debug!(peer = %peer_for_log, error = %e, "Handshake failed");
+                record_handshake_failure_class(
+                    &beobachten_for_timeout,
+                    &config_for_timeout,
+                    peer_for_timeout,
+                    &e,
+                );
+                return Err(e);
+            }
+            Err(_) => {
+                stats.increment_handshake_timeouts();
+                debug!(peer = %peer_for_log, "Handshake timeout");
+                record_beobachten_class(
+                    &beobachten_for_timeout,
+                    &config_for_timeout,
+                    peer_for_timeout,
+                    "other",
+                );
+                return Err(ProxyError::TgHandshakeTimeout);
+            }
+        };
+
+        Ok(Some(outcome))
     }
 
     async fn handle_tls_client(

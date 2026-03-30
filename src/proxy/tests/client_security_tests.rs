@@ -1,8 +1,10 @@
 use super::*;
 use crate::config::{UpstreamConfig, UpstreamType};
-use crate::crypto::AesCtr;
-use crate::crypto::sha256_hmac;
-use crate::protocol::constants::ProtoTag;
+use crate::crypto::{AesCtr, sha256, sha256_hmac};
+use crate::protocol::constants::{
+    DC_IDX_POS, HANDSHAKE_LEN, IV_LEN, PREKEY_LEN, PROTO_TAG_POS, ProtoTag, SKIP_LEN,
+    TLS_RECORD_CHANGE_CIPHER,
+};
 use crate::protocol::tls;
 use crate::proxy::handshake::HandshakeSuccess;
 use crate::stream::{CryptoReader, CryptoWriter};
@@ -1319,6 +1321,163 @@ async fn running_client_handler_increments_connects_all_exactly_once() {
     );
 }
 
+#[tokio::test(start_paused = true)]
+async fn idle_pooled_connection_closes_cleanly_in_generic_stream_path() {
+    let mut cfg = ProxyConfig::default();
+    cfg.general.beobachten = false;
+    cfg.timeouts.client_first_byte_idle_secs = 1;
+
+    let config = Arc::new(cfg);
+    let stats = Arc::new(Stats::new());
+    let upstream_manager = Arc::new(UpstreamManager::new(
+        vec![UpstreamConfig {
+            upstream_type: UpstreamType::Direct {
+                interface: None,
+                bind_addresses: None,
+            },
+            weight: 1,
+            enabled: true,
+            scopes: String::new(),
+            selected_scope: String::new(),
+        }],
+        1,
+        1,
+        1,
+        10,
+        1,
+        false,
+        stats.clone(),
+    ));
+    let replay_checker = Arc::new(ReplayChecker::new(128, Duration::from_secs(60)));
+    let buffer_pool = Arc::new(BufferPool::new());
+    let rng = Arc::new(SecureRandom::new());
+    let route_runtime = Arc::new(RouteRuntimeController::new(RelayRouteMode::Direct));
+    let ip_tracker = Arc::new(UserIpTracker::new());
+    let beobachten = Arc::new(BeobachtenStore::new());
+
+    let (server_side, _client_side) = duplex(4096);
+    let peer: SocketAddr = "198.51.100.169:55200".parse().unwrap();
+
+    let handler = tokio::spawn(handle_client_stream(
+        server_side,
+        peer,
+        config,
+        stats.clone(),
+        upstream_manager,
+        replay_checker,
+        buffer_pool,
+        rng,
+        None,
+        route_runtime,
+        None,
+        ip_tracker,
+        beobachten,
+        false,
+    ));
+
+    // Let the spawned handler arm the idle-phase timeout before advancing paused time.
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(2)).await;
+    tokio::task::yield_now().await;
+
+    let result = tokio::time::timeout(Duration::from_secs(1), handler)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(result.is_ok());
+    assert_eq!(stats.get_handshake_timeouts(), 0);
+    assert_eq!(stats.get_connects_bad(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn idle_pooled_connection_closes_cleanly_in_client_handler_path() {
+    let front_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let front_addr = front_listener.local_addr().unwrap();
+
+    let mut cfg = ProxyConfig::default();
+    cfg.general.beobachten = false;
+    cfg.timeouts.client_first_byte_idle_secs = 1;
+
+    let config = Arc::new(cfg);
+    let stats = Arc::new(Stats::new());
+    let upstream_manager = Arc::new(UpstreamManager::new(
+        vec![UpstreamConfig {
+            upstream_type: UpstreamType::Direct {
+                interface: None,
+                bind_addresses: None,
+            },
+            weight: 1,
+            enabled: true,
+            scopes: String::new(),
+            selected_scope: String::new(),
+        }],
+        1,
+        1,
+        1,
+        10,
+        1,
+        false,
+        stats.clone(),
+    ));
+    let replay_checker = Arc::new(ReplayChecker::new(128, Duration::from_secs(60)));
+    let buffer_pool = Arc::new(BufferPool::new());
+    let rng = Arc::new(SecureRandom::new());
+    let route_runtime = Arc::new(RouteRuntimeController::new(RelayRouteMode::Direct));
+    let ip_tracker = Arc::new(UserIpTracker::new());
+    let beobachten = Arc::new(BeobachtenStore::new());
+
+    let server_task = {
+        let config = config.clone();
+        let stats = stats.clone();
+        let upstream_manager = upstream_manager.clone();
+        let replay_checker = replay_checker.clone();
+        let buffer_pool = buffer_pool.clone();
+        let rng = rng.clone();
+        let route_runtime = route_runtime.clone();
+        let ip_tracker = ip_tracker.clone();
+        let beobachten = beobachten.clone();
+
+        tokio::spawn(async move {
+            let (stream, peer) = front_listener.accept().await.unwrap();
+            let real_peer_report = Arc::new(std::sync::Mutex::new(None));
+            ClientHandler::new(
+                stream,
+                peer,
+                config,
+                stats,
+                upstream_manager,
+                replay_checker,
+                buffer_pool,
+                rng,
+                None,
+                route_runtime,
+                None,
+                ip_tracker,
+                beobachten,
+                false,
+                real_peer_report,
+            )
+            .run()
+            .await
+        })
+    };
+
+    let _client = TcpStream::connect(front_addr).await.unwrap();
+
+    // Let the accepted connection reach the idle wait before advancing paused time.
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(2)).await;
+    tokio::task::yield_now().await;
+
+    let result = tokio::time::timeout(Duration::from_secs(1), server_task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(result.is_ok());
+    assert_eq!(stats.get_handshake_timeouts(), 0);
+    assert_eq!(stats.get_connects_bad(), 0);
+}
+
 #[tokio::test]
 async fn partial_tls_header_stall_triggers_handshake_timeout() {
     let mut cfg = ProxyConfig::default();
@@ -1485,6 +1644,147 @@ fn wrap_tls_application_data(payload: &[u8]) -> Vec<u8> {
     record.extend_from_slice(&(payload.len() as u16).to_be_bytes());
     record.extend_from_slice(payload);
     record
+}
+
+fn wrap_tls_ccs_record() -> Vec<u8> {
+    let mut record = Vec::with_capacity(6);
+    record.push(TLS_RECORD_CHANGE_CIPHER);
+    record.extend_from_slice(&[0x03, 0x03]);
+    record.extend_from_slice(&1u16.to_be_bytes());
+    record.push(0x01);
+    record
+}
+
+fn make_valid_mtproto_handshake(
+    secret_hex: &str,
+    proto_tag: ProtoTag,
+    dc_idx: i16,
+) -> [u8; HANDSHAKE_LEN] {
+    let secret = hex::decode(secret_hex).expect("secret hex must decode for mtproto test helper");
+
+    let mut handshake = [0x5Au8; HANDSHAKE_LEN];
+    for (idx, b) in handshake[SKIP_LEN..SKIP_LEN + PREKEY_LEN + IV_LEN]
+        .iter_mut()
+        .enumerate()
+    {
+        *b = (idx as u8).wrapping_add(1);
+    }
+
+    let dec_prekey = &handshake[SKIP_LEN..SKIP_LEN + PREKEY_LEN];
+    let dec_iv_bytes = &handshake[SKIP_LEN + PREKEY_LEN..SKIP_LEN + PREKEY_LEN + IV_LEN];
+
+    let mut dec_key_input = Vec::with_capacity(PREKEY_LEN + secret.len());
+    dec_key_input.extend_from_slice(dec_prekey);
+    dec_key_input.extend_from_slice(&secret);
+    let dec_key = sha256(&dec_key_input);
+
+    let mut dec_iv_arr = [0u8; IV_LEN];
+    dec_iv_arr.copy_from_slice(dec_iv_bytes);
+    let dec_iv = u128::from_be_bytes(dec_iv_arr);
+
+    let mut stream = AesCtr::new(&dec_key, dec_iv);
+    let keystream = stream.encrypt(&[0u8; HANDSHAKE_LEN]);
+
+    let mut target_plain = [0u8; HANDSHAKE_LEN];
+    target_plain[PROTO_TAG_POS..PROTO_TAG_POS + 4].copy_from_slice(&proto_tag.to_bytes());
+    target_plain[DC_IDX_POS..DC_IDX_POS + 2].copy_from_slice(&dc_idx.to_le_bytes());
+
+    for idx in PROTO_TAG_POS..HANDSHAKE_LEN {
+        handshake[idx] = target_plain[idx] ^ keystream[idx];
+    }
+
+    handshake
+}
+
+#[tokio::test]
+async fn fragmented_tls_mtproto_with_interleaved_ccs_is_accepted() {
+    let secret_hex = "55555555555555555555555555555555";
+    let secret = [0x55u8; 16];
+    let client_hello = make_valid_tls_client_hello(&secret, 0);
+    let mtproto_handshake = make_valid_mtproto_handshake(secret_hex, ProtoTag::Secure, 2);
+
+    let mut cfg = ProxyConfig::default();
+    cfg.general.beobachten = false;
+    cfg.access.ignore_time_skew = true;
+    cfg.access
+        .users
+        .insert("user".to_string(), secret_hex.to_string());
+
+    let config = Arc::new(cfg);
+    let replay_checker = Arc::new(ReplayChecker::new(128, Duration::from_secs(60)));
+    let rng = SecureRandom::new();
+
+    let (server_side, mut client_side) = duplex(131072);
+    let peer: SocketAddr = "198.51.100.85:55007".parse().unwrap();
+    let (read_half, write_half) = tokio::io::split(server_side);
+
+    let (mut tls_reader, tls_writer, tls_user) = match handle_tls_handshake(
+        &client_hello,
+        read_half,
+        write_half,
+        peer,
+        &config,
+        &replay_checker,
+        &rng,
+        None,
+    )
+    .await
+    {
+        HandshakeResult::Success(result) => result,
+        _ => panic!("expected successful TLS handshake"),
+    };
+
+    let mut tls_response_head = [0u8; 5];
+    client_side
+        .read_exact(&mut tls_response_head)
+        .await
+        .unwrap();
+    assert_eq!(tls_response_head[0], 0x16);
+    let tls_response_len = u16::from_be_bytes([tls_response_head[3], tls_response_head[4]]) as usize;
+    let mut tls_response_body = vec![0u8; tls_response_len];
+    client_side
+        .read_exact(&mut tls_response_body)
+        .await
+        .unwrap();
+
+    client_side
+        .write_all(&wrap_tls_application_data(&mtproto_handshake[..13]))
+        .await
+        .unwrap();
+    client_side.write_all(&wrap_tls_ccs_record()).await.unwrap();
+    client_side
+        .write_all(&wrap_tls_application_data(&mtproto_handshake[13..37]))
+        .await
+        .unwrap();
+    client_side.write_all(&wrap_tls_ccs_record()).await.unwrap();
+    client_side
+        .write_all(&wrap_tls_application_data(&mtproto_handshake[37..]))
+        .await
+        .unwrap();
+
+    let mtproto_data = tls_reader.read_exact(HANDSHAKE_LEN).await.unwrap();
+    assert_eq!(&mtproto_data[..], &mtproto_handshake);
+
+    let mtproto_handshake: [u8; HANDSHAKE_LEN] = mtproto_data[..].try_into().unwrap();
+    let (_, _, success) = match handle_mtproto_handshake(
+        &mtproto_handshake,
+        tls_reader,
+        tls_writer,
+        peer,
+        &config,
+        &replay_checker,
+        true,
+        Some(tls_user.as_str()),
+    )
+    .await
+    {
+        HandshakeResult::Success(result) => result,
+        _ => panic!("expected successful MTProto handshake"),
+    };
+
+    assert_eq!(success.user, "user");
+    assert_eq!(success.proto_tag, ProtoTag::Secure);
+    assert_eq!(success.dc_idx, 2);
 }
 
 #[tokio::test]

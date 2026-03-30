@@ -18,6 +18,28 @@ fn remove_temp_config(path: &PathBuf) {
 }
 
 #[test]
+fn default_timeouts_enable_apple_compatible_handshake_profile() {
+    let cfg = ProxyConfig::default();
+    assert_eq!(cfg.timeouts.client_first_byte_idle_secs, 300);
+    assert_eq!(cfg.timeouts.client_handshake, 60);
+}
+
+#[test]
+fn load_accepts_zero_first_byte_idle_timeout_as_legacy_opt_out() {
+    let path = write_temp_config(
+        r#"
+[timeouts]
+client_first_byte_idle_secs = 0
+"#,
+    );
+
+    let cfg = ProxyConfig::load(&path).expect("config with zero first-byte idle timeout must load");
+    assert_eq!(cfg.timeouts.client_first_byte_idle_secs, 0);
+
+    remove_temp_config(&path);
+}
+
+#[test]
 fn load_rejects_relay_hard_idle_smaller_than_soft_idle_with_clear_error() {
     let path = write_temp_config(
         r#"

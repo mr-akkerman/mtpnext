@@ -610,7 +610,8 @@ ip = "0.0.0.0"
 ip = "::"
 
 [timeouts]
-client_handshake = 15
+client_first_byte_idle_secs = 300
+client_handshake = 60
 client_keepalive = 60
 client_ack = 300
 

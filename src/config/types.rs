@@ -1319,6 +1319,12 @@ impl Default for ServerConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimeoutsConfig {
+    /// Maximum idle wait in seconds for the first client byte before handshake parsing starts.
+    /// `0` disables the separate idle phase and keeps legacy timeout behavior.
+    #[serde(default = "default_client_first_byte_idle_secs")]
+    pub client_first_byte_idle_secs: u64,
+
+    /// Maximum active handshake duration in seconds after the first client byte is received.
     #[serde(default = "default_handshake_timeout")]
     pub client_handshake: u64,
 
@@ -1358,6 +1364,7 @@ pub struct TimeoutsConfig {
 impl Default for TimeoutsConfig {
     fn default() -> Self {
         Self {
+            client_first_byte_idle_secs: default_client_first_byte_idle_secs(),
             client_handshake: default_handshake_timeout(),
             relay_idle_policy_v2_enabled: default_relay_idle_policy_v2_enabled(),
             relay_client_idle_soft_secs: default_relay_client_idle_soft_secs(),

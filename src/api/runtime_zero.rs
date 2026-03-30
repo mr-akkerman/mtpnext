@@ -50,6 +50,7 @@ pub(super) struct RuntimeGatesData {
 
 #[derive(Serialize)]
 pub(super) struct EffectiveTimeoutLimits {
+    pub(super) client_first_byte_idle_secs: u64,
     pub(super) client_handshake_secs: u64,
     pub(super) tg_connect_secs: u64,
     pub(super) client_keepalive_secs: u64,
@@ -227,6 +228,7 @@ pub(super) fn build_limits_effective_data(cfg: &ProxyConfig) -> EffectiveLimitsD
         me_reinit_every_secs: cfg.general.effective_me_reinit_every_secs(),
         me_pool_force_close_secs: cfg.general.effective_me_pool_force_close_secs(),
         timeouts: EffectiveTimeoutLimits {
+            client_first_byte_idle_secs: cfg.timeouts.client_first_byte_idle_secs,
             client_handshake_secs: cfg.timeouts.client_handshake,
             tg_connect_secs: cfg.general.tg_connect,
             client_keepalive_secs: cfg.timeouts.client_keepalive,
