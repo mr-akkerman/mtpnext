@@ -673,6 +673,8 @@ where
         .as_deref()
         .and_then(|sni| find_matching_tls_domain(config, sni));
 
+    let client_cipher_suites = tls::extract_cipher_suites_from_client_hello(handshake);
+
     let alpn_list = if config.censorship.alpn_enforce {
         tls::extract_alpn_from_client_hello(handshake)
     } else {
@@ -791,7 +793,7 @@ where
             use_full_cert_payload,
             rng,
             selected_alpn.clone(),
-            config.censorship.tls_new_session_tickets,
+            &client_cipher_suites,
         )
     } else {
         tls::build_server_hello(
@@ -801,7 +803,7 @@ where
             config.censorship.fake_cert_len,
             rng,
             selected_alpn.clone(),
-            config.censorship.tls_new_session_tickets,
+            &client_cipher_suites,
         )
     };
 

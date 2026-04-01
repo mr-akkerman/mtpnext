@@ -235,6 +235,11 @@ impl ServerHelloBuilder {
         self
     }
 
+    fn with_cipher_suite(mut self, cipher: [u8; 2]) -> Self {
+        self.cipher_suite = cipher;
+        self
+    }
+
     fn with_tls13_version(mut self) -> Self {
         // TLS 1.3 = 0x0304
         self.extensions.add_supported_versions(0x0304);
@@ -519,7 +524,7 @@ pub fn build_server_hello(
     fake_cert_len: usize,
     rng: &SecureRandom,
     alpn: Option<Vec<u8>>,
-    new_session_tickets: u8,
+    client_cipher_suites: &[[u8; 2]],
 ) -> Vec<u8> {
     const MIN_APP_DATA: usize = 64;
     const MAX_APP_DATA: usize = MAX_TLS_CIPHERTEXT_SIZE;
@@ -528,6 +533,7 @@ pub fn build_server_hello(
 
     // Build ServerHello
     let server_hello = ServerHelloBuilder::new(session_id.to_vec())
+        .with_cipher_suite(select_cipher_suite(client_cipher_suites, None))
         .with_x25519_key(&x25519_key)
         .with_tls13_version()
         .build_record();
@@ -561,7 +567,8 @@ pub fn build_server_hello(
         }
     }
     if fake_cert.len() < fake_cert_len {
-        fake_cert.extend_from_slice(&rng.bytes(fake_cert_len - fake_cert.len()));
+        let padding_len = fake_cert_len - fake_cert.len();
+        fake_cert.extend_from_slice(&gen_fake_asn1_padding(padding_len, rng));
     } else if fake_cert.len() > fake_cert_len {
         fake_cert.truncate(fake_cert_len);
     }
@@ -574,35 +581,13 @@ pub fn build_server_hello(
     // deterministic DPI fingerprints (fixed inner content type markers).
     app_data_record.extend_from_slice(&fake_cert);
 
-    // Build optional NewSessionTicket records (TLS 1.3 handshake messages are encrypted;
-    // here we mimic with opaque ApplicationData records of plausible size).
-    let mut tickets = Vec::new();
-    let ticket_count = new_session_tickets.min(4);
-    if ticket_count > 0 {
-        for _ in 0..ticket_count {
-            let ticket_len: usize = rng.range(48) + 48; // 48-95 bytes
-            let mut record = Vec::with_capacity(5 + ticket_len);
-            record.push(TLS_RECORD_APPLICATION);
-            record.extend_from_slice(&TLS_VERSION);
-            record.extend_from_slice(&(ticket_len as u16).to_be_bytes());
-            record.extend_from_slice(&rng.bytes(ticket_len));
-            tickets.push(record);
-        }
-    }
-
     // Combine all records
     let mut response = Vec::with_capacity(
-        server_hello.len()
-            + change_cipher_spec.len()
-            + app_data_record.len()
-            + tickets.iter().map(|r| r.len()).sum::<usize>(),
+        server_hello.len() + change_cipher_spec.len() + app_data_record.len(),
     );
     response.extend_from_slice(&server_hello);
     response.extend_from_slice(&change_cipher_spec);
     response.extend_from_slice(&app_data_record);
-    for t in &tickets {
-        response.extend_from_slice(t);
-    }
 
     // Compute HMAC for the response
     let mut hmac_input = Vec::with_capacity(TLS_DIGEST_LEN + response.len());
@@ -742,6 +727,79 @@ fn is_valid_sni_hostname(host: &str) -> bool {
     true
 }
 
+/// Extract Cipher Suites from a TLS ClientHello.
+pub fn extract_cipher_suites_from_client_hello(handshake: &[u8]) -> Vec<[u8; 2]> {
+    if handshake.len() < 43 || handshake[0] != TLS_RECORD_HANDSHAKE {
+        return Vec::new();
+    }
+
+    let record_len = u16::from_be_bytes([handshake[3], handshake[4]]) as usize;
+    if handshake.len() < 5 + record_len {
+        return Vec::new();
+    }
+
+    let mut pos = 5; // after record header
+    if handshake.get(pos) != Some(&0x01) {
+        return Vec::new(); // not ClientHello
+    }
+
+    pos += 4; // type + len (3)
+    pos += 2 + 32; // version (2) + random (32)
+    if pos + 1 > handshake.len() {
+        return Vec::new();
+    }
+
+    let session_id_len = *handshake.get(pos).unwrap_or(&0) as usize;
+    pos += 1 + session_id_len;
+    if pos + 2 > handshake.len() {
+        return Vec::new();
+    }
+
+    let cipher_suites_len = u16::from_be_bytes([handshake[pos], handshake[pos + 1]]) as usize;
+    pos += 2;
+    if pos + cipher_suites_len > handshake.len() {
+        return Vec::new();
+    }
+    
+    let mut out = Vec::with_capacity(cipher_suites_len / 2);
+    let mut cs_pos = pos;
+    while cs_pos + 1 < pos + cipher_suites_len {
+        out.push([handshake[cs_pos], handshake[cs_pos + 1]]);
+        cs_pos += 2;
+    }
+
+    out
+}
+
+/// Select best matched cipher suite between client's list and server's defaults.
+pub fn select_cipher_suite(client_suites: &[[u8; 2]], template_suite: Option<[u8; 2]>) -> [u8; 2] {
+    let supported = [
+        [0x13, 0x01], // TLS_AES_128_GCM_SHA256
+        [0x13, 0x02], // TLS_AES_256_GCM_SHA384
+        [0x13, 0x03], // TLS_CHACHA20_POLY1305_SHA256
+        [0xc0, 0x2b], // TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
+        [0xc0, 0x2f], // TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+        [0xc0, 0x2c], // TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
+        [0xc0, 0x30], // TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
+        [0xcc, 0xa9], // TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256
+        [0xcc, 0xa8], // TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256
+    ];
+    
+    if let Some(t_suite) = template_suite {
+        if t_suite != [0, 0] && client_suites.contains(&t_suite) {
+            return t_suite;
+        }
+    }
+    
+    for suite in client_suites {
+        if supported.contains(suite) {
+            return *suite;
+        }
+    }
+    
+    template_suite.filter(|s| *s != [0, 0]).unwrap_or([0x13, 0x01])
+}
+
 /// Extract ALPN protocol list from ClientHello, return in offered order.
 pub fn extract_alpn_from_client_hello(handshake: &[u8]) -> Vec<Vec<u8>> {
     if handshake.len() < 5 || handshake[0] != TLS_RECORD_HANDSHAKE {
@@ -801,13 +859,67 @@ pub fn extract_alpn_from_client_hello(handshake: &[u8]) -> Vec<Vec<u8>> {
                 if lp + plen > list_end {
                     break;
                 }
-                out.push(handshake[lp..lp + plen].to_vec());
+                if plen > 0 {
+                    out.push(handshake[lp..lp + plen].to_vec());
+                }
                 lp += plen;
             }
             break;
         }
         pos += elen;
     }
+    out
+}
+
+/// Generate pseudo ASN.1 structurally-valid padding to reduce entropy to typical X.509 certificate levels.
+/// Pure RNG yields 8.00 Shannon entropy, which is heavily fingerprinted by DPI as encrypted proxy traffic.
+pub fn gen_fake_asn1_padding(len: usize, rng: &SecureRandom) -> Vec<u8> {
+    if len < 4 {
+        return rng.bytes(len);
+    }
+    let mut out = Vec::with_capacity(len);
+    
+    // SEQUENCE
+    out.push(0x30);
+    
+    // Write length (2 bytes for simplicity, clamping up to 65535)
+    let seq_inner_len = len - 4;
+    out.push(0x82); 
+    out.extend_from_slice(&(seq_inner_len as u16).to_be_bytes());
+
+    let mut emitted = 0;
+    while emitted < seq_inner_len {
+        let rand_byte = rng.bytes(1)[0];
+        let chunk_type = if rand_byte % 2 == 0 { 0x0c } else { 0x04 }; // UTF8String or OctetString
+        let chunk_max_len = std::cmp::min(seq_inner_len - emitted, 1024);
+        
+        if chunk_max_len < 4 {
+            out.extend_from_slice(&rng.bytes(chunk_max_len));
+            emitted += chunk_max_len;
+            continue;
+        }
+
+        let chunk_inner_len = chunk_max_len - 4;
+        out.push(chunk_type);
+        out.push(0x82);
+        out.extend_from_slice(&(chunk_inner_len as u16).to_be_bytes());
+        
+        // Generate pseudo low-entropy data. Repeated bytes, typical of base64 strings or typical DER.
+        // We map RNG bytes to base64 alphabet restricting entropy to ~6.0.
+        let raw = rng.bytes(chunk_inner_len);
+        let b64_like: Vec<u8> = raw.into_iter().map(|b| {
+            let v = b % 64;
+            if v < 26 { b'A' + v }
+            else if v < 52 { b'a' + (v - 26) }
+            else if v < 62 { b'0' + (v - 52) }
+            else if v == 62 { b'+' }
+            else { b'/' }
+        }).collect();
+        
+        out.extend_from_slice(&b64_like);
+        emitted += chunk_max_len;
+    }
+    
     out
 }
 

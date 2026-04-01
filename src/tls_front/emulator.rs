@@ -107,7 +107,7 @@ pub fn build_emulated_server_hello(
     use_full_cert_payload: bool,
     rng: &SecureRandom,
     alpn: Option<Vec<u8>>,
-    new_session_tickets: u8,
+    client_cipher_suites: &[[u8; 2]],
 ) -> Vec<u8> {
     // --- ServerHello ---
     let mut extensions = Vec::new();
@@ -137,11 +137,10 @@ pub fn build_emulated_server_hello(
     message.extend_from_slice(&[0u8; 32]); // random placeholder
     message.push(session_id.len() as u8);
     message.extend_from_slice(session_id);
-    let cipher = if cached.server_hello_template.cipher_suite == [0, 0] {
-        [0x13, 0x01]
-    } else {
-        cached.server_hello_template.cipher_suite
-    };
+    let cipher = crate::protocol::tls::select_cipher_suite(
+        client_cipher_suites,
+        if cached.server_hello_template.cipher_suite == [0, 0] { None } else { Some(cached.server_hello_template.cipher_suite) }
+    );
     message.extend_from_slice(&cipher);
     message.push(cached.server_hello_template.compression);
     message.extend_from_slice(&extensions_len.to_be_bytes());
@@ -238,12 +237,12 @@ pub fn build_emulated_server_hello(
                     payload_offset += copy_len;
                 }
                 if body_len > copy_len {
-                    rec.extend_from_slice(&rng.bytes(body_len - copy_len));
+                    rec.extend_from_slice(&crate::protocol::tls::gen_fake_asn1_padding(body_len - copy_len, rng));
                 }
                 rec.push(0x16); // inner content type marker (handshake)
                 rec.extend_from_slice(&rng.bytes(16)); // AEAD-like tag
             } else {
-                rec.extend_from_slice(&rng.bytes(size));
+                rec.extend_from_slice(&crate::protocol::tls::gen_fake_asn1_padding(size, rng));
             }
         } else if size > 17 {
             let body_len = size - 17;
@@ -254,46 +253,30 @@ pub fn build_emulated_server_hello(
                 if marker.len() <= body_len {
                     body.extend_from_slice(marker);
                     if body_len > marker.len() {
-                        body.extend_from_slice(&rng.bytes(body_len - marker.len()));
+                        body.extend_from_slice(&crate::protocol::tls::gen_fake_asn1_padding(body_len - marker.len(), rng));
                     }
                 } else {
-                    body.extend_from_slice(&rng.bytes(body_len));
+                    body.extend_from_slice(&crate::protocol::tls::gen_fake_asn1_padding(body_len, rng));
                 }
             } else {
-                body.extend_from_slice(&rng.bytes(body_len));
+                body.extend_from_slice(&crate::protocol::tls::gen_fake_asn1_padding(body_len, rng));
             }
             rec.extend_from_slice(&body);
             rec.push(0x16); // inner content type marker (handshake)
             rec.extend_from_slice(&rng.bytes(16)); // AEAD-like tag
         } else {
-            rec.extend_from_slice(&rng.bytes(size));
+            rec.extend_from_slice(&crate::protocol::tls::gen_fake_asn1_padding(size, rng));
         }
         app_data.extend_from_slice(&rec);
     }
 
     // --- Combine ---
-    // Optional NewSessionTicket mimic records (opaque ApplicationData for fingerprint).
-    let mut tickets = Vec::new();
-    let ticket_count = new_session_tickets.min(4);
-    if ticket_count > 0 {
-        for _ in 0..ticket_count {
-            let ticket_len: usize = rng.range(48) + 48;
-            let mut rec = Vec::with_capacity(5 + ticket_len);
-            rec.push(TLS_RECORD_APPLICATION);
-            rec.extend_from_slice(&TLS_VERSION);
-            rec.extend_from_slice(&(ticket_len as u16).to_be_bytes());
-            rec.extend_from_slice(&rng.bytes(ticket_len));
-            tickets.extend_from_slice(&rec);
-        }
-    }
-
     let mut response = Vec::with_capacity(
-        server_hello.len() + change_cipher_spec.len() + app_data.len() + tickets.len(),
+        server_hello.len() + change_cipher_spec.len() + app_data.len(),
     );
     response.extend_from_slice(&server_hello);
     response.extend_from_slice(&change_cipher_spec);
     response.extend_from_slice(&app_data);
-    response.extend_from_slice(&tickets);
 
     // --- HMAC ---
     let mut hmac_input = Vec::with_capacity(TLS_DIGEST_LEN + response.len());
@@ -370,7 +353,7 @@ mod tests {
             true,
             &rng,
             None,
-            0,
+            &[],
         );
 
         assert_eq!(response[0], TLS_RECORD_HANDSHAKE);
@@ -396,7 +379,7 @@ mod tests {
             true,
             &rng,
             None,
-            0,
+            &[],
         );
 
         let payload = first_app_data_payload(&response);
@@ -428,7 +411,7 @@ mod tests {
             false,
             &rng,
             None,
-            0,
+            &[],
         );
 
         let payload = first_app_data_payload(&response);
@@ -453,7 +436,7 @@ mod tests {
             false,
             &rng,
             None,
-            0,
+            &[],
         );
 
         let hello_len = u16::from_be_bytes([response[3], response[4]]) as usize;
