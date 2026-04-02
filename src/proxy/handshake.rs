@@ -811,16 +811,40 @@ where
     // distinguishability between success and fail-closed handshakes.
     maybe_apply_server_hello_delay(config).await;
 
-    debug!(peer = %peer, response_len = response.len(), "Sending TLS ServerHello");
+    debug!(peer = %peer, response_len = response.len(), "Sending TLS ServerHello (fragmented)");
 
-    if let Err(e) = writer.write_all(&response).await {
-        warn!(peer = %peer, error = %e, "Failed to write TLS ServerHello");
-        return HandshakeResult::Error(ProxyError::Io(e));
-    }
+    // Extreme TCP Fragmentation (Server-Side GoodbyeDPI)
+    // We split the Fake TLS ServerHello into micro-chunks to bypass DPI shape analysis and reassembly.
+    // We only fragment the first 300 bytes to blind the DPI without delaying the whole payload.
+    const FRAG_LIMIT: usize = 300;
+    let mut offset = 0;
 
-    if let Err(e) = writer.flush().await {
-        warn!(peer = %peer, error = %e, "Failed to flush TLS ServerHello");
-        return HandshakeResult::Error(ProxyError::Io(e));
+    while offset < response.len() {
+        let chunk_size = if offset == 0 {
+            1
+        } else if offset < FRAG_LIMIT {
+            let random_val = rand::rng().random_range(1..=5);
+            random_val.min(response.len() - offset)
+        } else {
+            response.len() - offset
+        };
+
+        if let Err(e) = writer.write_all(&response[offset..offset + chunk_size]).await {
+            warn!(peer = %peer, offset, chunk_size, error = %e, "Failed to write TLS ServerHello fragment");
+            return HandshakeResult::Error(ProxyError::Io(e));
+        }
+
+        // Force TCP segment emission
+        if let Err(e) = writer.flush().await {
+            warn!(peer = %peer, offset, error = %e, "Failed to flush TLS ServerHello fragment");
+            return HandshakeResult::Error(ProxyError::Io(e));
+        }
+
+        offset += chunk_size;
+
+        if offset < response.len() && offset < FRAG_LIMIT {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
     }
 
     debug!(
