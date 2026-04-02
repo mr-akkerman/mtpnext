@@ -1797,7 +1797,7 @@ where
             } else {
                 trace!(conn_id, confirm, "ME->C quickack");
             }
-            write_client_ack(client_writer, proto_tag, confirm).await?;
+            write_client_ack(client_writer, rng, proto_tag, confirm).await?;
             stats.increment_me_d2c_ack_frames_total();
 
             Ok(MeWriterResponseOutcome::Continue {
@@ -1876,21 +1876,12 @@ where
                     frame_buf.reserve(wire_len);
                     frame_buf.push(first);
                     frame_buf.extend_from_slice(data);
-                    client_writer
-                        .write_all(frame_buf.as_slice())
-                        .await
-                        .map_err(ProxyError::Io)?;
+                    write_jitter_payload(client_writer, rng, frame_buf.as_slice()).await?;
                     MeD2cWriteMode::Coalesced
                 } else {
                     let header = [first];
-                    client_writer
-                        .write_all(&header)
-                        .await
-                        .map_err(ProxyError::Io)?;
-                    client_writer
-                        .write_all(data)
-                        .await
-                        .map_err(ProxyError::Io)?;
+                    write_jitter_payload(client_writer, rng, &header).await?;
+                    write_jitter_payload(client_writer, rng, data).await?;
                     MeD2cWriteMode::Split
                 }
             } else if len_words < (1 << 24) {
@@ -1905,21 +1896,12 @@ where
                     frame_buf.reserve(wire_len);
                     frame_buf.extend_from_slice(&[first, lw[0], lw[1], lw[2]]);
                     frame_buf.extend_from_slice(data);
-                    client_writer
-                        .write_all(frame_buf.as_slice())
-                        .await
-                        .map_err(ProxyError::Io)?;
+                    write_jitter_payload(client_writer, rng, frame_buf.as_slice()).await?;
                     MeD2cWriteMode::Coalesced
                 } else {
                     let header = [first, lw[0], lw[1], lw[2]];
-                    client_writer
-                        .write_all(&header)
-                        .await
-                        .map_err(ProxyError::Io)?;
-                    client_writer
-                        .write_all(data)
-                        .await
-                        .map_err(ProxyError::Io)?;
+                    write_jitter_payload(client_writer, rng, &header).await?;
+                    write_jitter_payload(client_writer, rng, data).await?;
                     MeD2cWriteMode::Split
                 }
             } else {
@@ -1954,21 +1936,12 @@ where
                     frame_buf.resize(start + padding_len, 0);
                     rng.fill(&mut frame_buf[start..]);
                 }
-                client_writer
-                    .write_all(frame_buf.as_slice())
-                    .await
-                    .map_err(ProxyError::Io)?;
+                write_jitter_payload(client_writer, rng, frame_buf.as_slice()).await?;
                 MeD2cWriteMode::Coalesced
             } else {
                 let header = len_val.to_le_bytes();
-                client_writer
-                    .write_all(&header)
-                    .await
-                    .map_err(ProxyError::Io)?;
-                client_writer
-                    .write_all(data)
-                    .await
-                    .map_err(ProxyError::Io)?;
+                write_jitter_payload(client_writer, rng, &header).await?;
+                write_jitter_payload(client_writer, rng, data).await?;
                 if padding_len > 0 {
                     frame_buf.clear();
                     if frame_buf.capacity() < padding_len {
@@ -1976,10 +1949,7 @@ where
                     }
                     frame_buf.resize(padding_len, 0);
                     rng.fill(frame_buf.as_mut_slice());
-                    client_writer
-                        .write_all(frame_buf.as_slice())
-                        .await
-                        .map_err(ProxyError::Io)?;
+                    write_jitter_payload(client_writer, rng, frame_buf.as_slice()).await?;
                 }
                 MeD2cWriteMode::Split
             }
@@ -1991,6 +1961,7 @@ where
 
 async fn write_client_ack<W>(
     client_writer: &mut CryptoWriter<W>,
+    rng: &SecureRandom,
     proto_tag: ProtoTag,
     confirm: u32,
 ) -> Result<()>
@@ -2002,10 +1973,47 @@ where
     } else {
         confirm.to_le_bytes()
     };
-    client_writer
-        .write_all(&bytes)
-        .await
-        .map_err(ProxyError::Io)
+    write_jitter_payload(client_writer, rng, &bytes).await
+}
+
+async fn write_jitter_payload<W>(
+    client_writer: &mut CryptoWriter<W>,
+    rng: &SecureRandom,
+    buffer: &[u8],
+) -> Result<()>
+where
+    W: AsyncWrite + Unpin + Send + 'static,
+{
+    // JITTER & PADDING (Hypothesis 2: Server-Side Shape Distorter)
+    // Avoid chunking extremely small frames (like ACKs) to maintain efficiency where DPI
+    // signature is unlikely to be triggered anyway.
+    if buffer.len() <= 300 {
+        client_writer.write_all(buffer).await.map_err(ProxyError::Io)?;
+    } else {
+        let mut start = 0;
+        let mut is_first = true;
+        while start < buffer.len() {
+            // First chunk is slightly smaller to immediately disrupt MTProto TLS record length analysis
+            let base_chunk = if is_first { 100 } else { 200 };
+            let chunk_size = base_chunk + (rng.get_u32() % 600) as usize;
+            let end = (start + chunk_size).min(buffer.len());
+            
+            client_writer.write_all(&buffer[start..end]).await.map_err(ProxyError::Io)?;
+            
+            // Force flush so that the record is fully constructed and emitted to TCP layer, 
+            // guaranteeing boundary manifestation on the wire.
+            client_writer.flush().await.map_err(ProxyError::Io)?;
+            
+            if end < buffer.len() {
+                // Micro-jitter: Unpredictable delays to break stateful ML time-series detection
+                let delay_ms = 1 + (rng.get_u32() % 6);
+                tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms as u64)).await;
+            }
+            start = end;
+            is_first = false;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
