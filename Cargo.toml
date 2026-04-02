@@ -91,6 +91,10 @@ criterion = "0.8"
 proptest = "1.4"
 futures = "0.3"
 
+[[bin]]
+name = "sni_hunter"
+path = "src/bin/sni_hunter.rs"
+
 [[bench]]
 name = "crypto_bench"
 harness = false
