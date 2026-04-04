@@ -60,8 +60,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
+use rand::Rng;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf, copy_bidirectional_with_sizes};
-use tokio::time::Instant;
+use tokio::time::{Instant, Sleep, sleep_until};
 use tracing::{debug, trace, warn};
 
 // ============= Constants =============
@@ -453,6 +454,86 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for StatsIo<S> {
 /// - Clean shutdown: both write sides are shut down on exit
 /// - Error propagation: quota exits return `ProxyError::DataQuotaExceeded`,
 ///   other I/O failures are returned as `ProxyError::Io`
+// ============= ShapedWriter =============
+
+/// A zero-allocation wrapper around an AsyncWrite that enforces chunking and micro-jitter delays.
+/// This prevents Stateful DPI and QoS mechanisms from recognizing continuous high-bandwidth streams.
+struct ShapedWriter<W> {
+    inner: W,
+    min_chunk: usize,
+    max_chunk: usize,
+    min_delay_ms: u64,
+    max_delay_ms: u64,
+    sleep: Pin<Box<Sleep>>,
+    sleep_active: bool,
+}
+
+impl<W> ShapedWriter<W> {
+    fn new(inner: W, min_chunk: usize, max_chunk: usize, min_delay_ms: u64, max_delay_ms: u64) -> Self {
+        Self {
+            inner,
+            min_chunk,
+            max_chunk,
+            min_delay_ms,
+            max_delay_ms,
+            sleep: Box::pin(sleep_until(Instant::now())),
+            sleep_active: false,
+        }
+    }
+}
+
+impl<W: AsyncWrite + Unpin> AsyncWrite for ShapedWriter<W> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        if self.sleep_active {
+            match self.sleep.as_mut().poll(cx) {
+                Poll::Ready(_) => {
+                    self.sleep_active = false;
+                }
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+
+        let max_write = if self.min_chunk >= self.max_chunk {
+            self.max_chunk
+        } else {
+            rand::rng().random_range(self.min_chunk..=self.max_chunk)
+        };
+
+        let chunk_len = std::cmp::min(buf.len(), max_write);
+
+        match Pin::new(&mut self.inner).poll_write(cx, &buf[..chunk_len]) {
+            Poll::Ready(Ok(n)) if n > 0 => {
+                let delay_ms = if self.min_delay_ms >= self.max_delay_ms {
+                    self.max_delay_ms
+                } else {
+                    rand::rng().random_range(self.min_delay_ms..=self.max_delay_ms)
+                };
+
+                if delay_ms > 0 {
+                    self.sleep.as_mut().reset(Instant::now() + Duration::from_millis(delay_ms));
+                    self.sleep_active = true;
+                }
+                Poll::Ready(Ok(n))
+            }
+            other => other,
+        }
+    }
+
+    #[inline]
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    #[inline]
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
 pub async fn relay_bidirectional<CR, CW, SR, SW>(
     client_reader: CR,
     client_writer: CW,
@@ -477,7 +558,10 @@ where
     let user_owned = user.to_string();
 
     // ── Combine split halves into bidirectional streams ──────────────
-    let client_combined = CombinedStream::new(client_reader, client_writer);
+    // Hypothesis 7: Inject ShapedWriter into the server-to-client direction (client_writer).
+    // Restricts chunks to 200-1200 bytes and adds 1-5ms jitter to break DPI QoS traffic analysis.
+    let shaped_client_writer = ShapedWriter::new(client_writer, 200, 1200, 1, 5);
+    let client_combined = CombinedStream::new(client_reader, shaped_client_writer);
     let mut server = CombinedStream::new(server_reader, server_writer);
 
     // Wrap client with stats/activity tracking
