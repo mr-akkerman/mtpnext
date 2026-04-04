@@ -454,30 +454,34 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for StatsIo<S> {
 /// - Clean shutdown: both write sides are shut down on exit
 /// - Error propagation: quota exits return `ProxyError::DataQuotaExceeded`,
 ///   other I/O failures are returned as `ProxyError::Io`
-// ============= ShapedWriter =============
+// ============= ShapedWriter (Batch-Buffering Macro Shaper) =============
 
-/// A zero-allocation wrapper around an AsyncWrite that enforces chunking and micro-jitter delays.
-/// This prevents Stateful DPI and QoS mechanisms from recognizing continuous high-bandwidth streams.
+/// A macro-shaper wrapper around an AsyncWrite that mimics HLS video / web bursts.
+/// Accumulates data into a burst buffer (up to threshold) or until a timeout fires,
+/// then flushes the entire block at max speed.
+/// This prevents Stateful DPI and QoS mechanisms from recognizing continuous high-bandwidth entropy.
 struct ShapedWriter<W> {
     inner: W,
-    min_chunk: usize,
-    max_chunk: usize,
-    min_delay_ms: u64,
-    max_delay_ms: u64,
+    buffer: Vec<u8>,
+    burst_threshold: usize,
+    timeout_ms: u64,
     sleep: Pin<Box<Sleep>>,
     sleep_active: bool,
+    flushing: bool,
+    flush_offset: usize,
 }
 
 impl<W> ShapedWriter<W> {
-    fn new(inner: W, min_chunk: usize, max_chunk: usize, min_delay_ms: u64, max_delay_ms: u64) -> Self {
+    fn new(inner: W, burst_threshold: usize, timeout_ms: u64) -> Self {
         Self {
             inner,
-            min_chunk,
-            max_chunk,
-            min_delay_ms,
-            max_delay_ms,
+            buffer: Vec::with_capacity(burst_threshold),
+            burst_threshold,
+            timeout_ms,
             sleep: Box::pin(sleep_until(Instant::now())),
             sleep_active: false,
+            flushing: false,
+            flush_offset: 0,
         }
     }
 }
@@ -488,48 +492,138 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for ShapedWriter<W> {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        if self.sleep_active {
+        if self.flushing {
+            while self.flush_offset < self.buffer.len() {
+                match Pin::new(&mut self.inner).poll_write(cx, &self.buffer[self.flush_offset..]) {
+                    Poll::Ready(Ok(0)) => {
+                        return Poll::Ready(Err(io::Error::new(
+                            io::ErrorKind::WriteZero,
+                            "failed to write shaped chunk to inner",
+                        )));
+                    }
+                    Poll::Ready(Ok(n)) => {
+                        self.flush_offset += n;
+                    }
+                    Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                    Poll::Pending => return Poll::Pending,
+                }
+            }
+            self.buffer.clear();
+            self.flush_offset = 0;
+            self.flushing = false;
+            self.sleep_active = false;
+        }
+
+        if buf.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+
+        let space = self.burst_threshold.saturating_sub(self.buffer.len());
+        if space == 0 {
+            self.flushing = true;
+            cx.waker().wake_by_ref();
+            return Poll::Pending;
+        }
+
+        let to_copy = std::cmp::min(buf.len(), space);
+        self.buffer.extend_from_slice(&buf[..to_copy]);
+
+        if !self.sleep_active {
+            self.sleep.as_mut().reset(Instant::now() + Duration::from_millis(self.timeout_ms));
+            self.sleep_active = true;
+        }
+
+        if self.buffer.len() >= self.burst_threshold {
+            self.flushing = true;
+            cx.waker().wake_by_ref();
+        } else if self.sleep_active {
             match self.sleep.as_mut().poll(cx) {
                 Poll::Ready(_) => {
-                    self.sleep_active = false;
+                    self.flushing = true;
                 }
-                Poll::Pending => return Poll::Pending,
+                Poll::Pending => {}
             }
         }
 
-        let max_write = if self.min_chunk >= self.max_chunk {
-            self.max_chunk
-        } else {
-            rand::rng().random_range(self.min_chunk..=self.max_chunk)
-        };
-
-        let chunk_len = std::cmp::min(buf.len(), max_write);
-
-        match Pin::new(&mut self.inner).poll_write(cx, &buf[..chunk_len]) {
-            Poll::Ready(Ok(n)) if n > 0 => {
-                let delay_ms = if self.min_delay_ms >= self.max_delay_ms {
-                    self.max_delay_ms
-                } else {
-                    rand::rng().random_range(self.min_delay_ms..=self.max_delay_ms)
-                };
-
-                if delay_ms > 0 {
-                    self.sleep.as_mut().reset(Instant::now() + Duration::from_millis(delay_ms));
-                    self.sleep_active = true;
-                }
-                Poll::Ready(Ok(n))
-            }
-            other => other,
-        }
+        Poll::Ready(Ok(to_copy))
     }
 
-    #[inline]
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.inner).poll_flush(cx)
+        if self.buffer.is_empty() && !self.flushing {
+            return Pin::new(&mut self.inner).poll_flush(cx);
+        }
+
+        if !self.flushing {
+            if self.buffer.len() >= self.burst_threshold {
+                self.flushing = true;
+            } else if self.sleep_active {
+                match self.sleep.as_mut().poll(cx) {
+                    Poll::Ready(_) => {
+                        self.flushing = true;
+                    }
+                    Poll::Pending => {
+                        return Poll::Pending;
+                    }
+                }
+            } else {
+                self.flushing = true;
+            }
+        }
+
+        if self.flushing {
+            while self.flush_offset < self.buffer.len() {
+                match Pin::new(&mut self.inner).poll_write(cx, &self.buffer[self.flush_offset..]) {
+                    Poll::Ready(Ok(0)) => {
+                        return Poll::Ready(Err(io::Error::new(
+                            io::ErrorKind::WriteZero,
+                            "failed to write shaped chunk to inner",
+                        )));
+                    }
+                    Poll::Ready(Ok(n)) => {
+                        self.flush_offset += n;
+                    }
+                    Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                    Poll::Pending => return Poll::Pending,
+                }
+            }
+            self.buffer.clear();
+            self.flush_offset = 0;
+            self.flushing = false;
+            self.sleep_active = false;
+
+            return Pin::new(&mut self.inner).poll_flush(cx);
+        }
+
+        Poll::Pending
     }
 
-    #[inline]
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if !self.buffer.is_empty() && !self.flushing {
+            self.flushing = true;
+        }
+
+        if self.flushing {
+            while self.flush_offset < self.buffer.len() {
+                match Pin::new(&mut self.inner).poll_write(cx, &self.buffer[self.flush_offset..]) {
+                    Poll::Ready(Ok(0)) => {
+                        return Poll::Ready(Err(io::Error::new(
+                            io::ErrorKind::WriteZero,
+                            "failed to write shaped chunk to inner",
+                        )));
+                    }
+                    Poll::Ready(Ok(n)) => {
+                        self.flush_offset += n;
+                    }
+                    Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                    Poll::Pending => return Poll::Pending,
+                }
+            }
+            self.buffer.clear();
+            self.flush_offset = 0;
+            self.flushing = false;
+            self.sleep_active = false;
+        }
+
         Pin::new(&mut self.inner).poll_shutdown(cx)
     }
 }
@@ -558,9 +652,10 @@ where
     let user_owned = user.to_string();
 
     // ── Combine split halves into bidirectional streams ──────────────
-    // Hypothesis 7: Inject ShapedWriter into the server-to-client direction (client_writer).
-    // Restricts chunks to 200-1200 bytes and adds 1-5ms jitter to break DPI QoS traffic analysis.
-    let shaped_client_writer = ShapedWriter::new(client_writer, 200, 1200, 1, 5);
+    // Hypothesis: Inject ShapedWriter into the server-to-client direction (client_writer).
+    // Restricts chunks via Batch-Buffering Macro Shaper, simulating HLS media streaming data patterns.
+    // We accumulate up to 64KB or 150ms before flushing.
+    let shaped_client_writer = ShapedWriter::new(client_writer, 65536, 150);
     let client_combined = CombinedStream::new(client_reader, shaped_client_writer);
     let mut server = CombinedStream::new(server_reader, server_writer);
 

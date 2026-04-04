@@ -39,6 +39,7 @@ use std::io::{self, Error, ErrorKind, Result};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
+use rand::Rng;
 
 use super::state::{HeaderBuffer, StreamState, WriteBuffer, YieldBuffer};
 use crate::protocol::constants::{
@@ -803,8 +804,16 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for FakeTlsWriter<W> {
             return Poll::Ready(Ok(0));
         }
 
-        // Chunk to maximum TLS payload size
-        let chunk_size = buf.len().min(MAX_TLS_PAYLOAD);
+        // Randomize TLS record sizes to break static DPI signatures.
+        // Instead of always taking the maximum available (up to MAX_TLS_PAYLOAD),
+        // we take a random slice length from the buffer.
+        let max_possible = buf.len().min(MAX_TLS_PAYLOAD);
+        let chunk_size = if max_possible > 1024 {
+            rand::rng().random_range(1024..=max_possible)
+        } else {
+            max_possible
+        };
+        
         let chunk = &buf[..chunk_size];
 
         // Build the complete record (header + payload)
