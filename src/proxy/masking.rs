@@ -605,7 +605,29 @@ pub async fn handle_bad_client<R, W>(
         return;
     }
 
+    // Zero-Latency In-Memory Fallback (Hypothesis 5: Active Probing Timing Evasion)
+    // To defeat DPI active probing latency analysis, we bypass TCP Splicing to the mask host
+    // entirely for simple HTTP GET probes and raw port scanners, answering them instantly.
+    // This removes the 30-200ms latency of connecting to mask_host, making the proxy indistinguishable
+    // from an ultra-fast hardware load balancer for casual probes.
+    if client_type == "HTTP" {
+        debug!(peer = %peer, "Zero-latency in-memory fallback for HTTP active probe");
+        let http_response = b"HTTP/1.1 400 Bad Request\r\nServer: nginx\r\nConnection: close\r\nContent-Type: text/html\r\nContent-Length: 150\r\n\r\n<html><body><center><h1>400 Bad Request</h1></center><hr><center>nginx</center></body></html>";
+        let _ = timeout(MASK_TIMEOUT, async {
+            let _ = writer.write_all(http_response).await;
+            let _ = writer.flush().await;
+        }).await;
+        return;
+    }
+
+    if client_type == "port-scanner" {
+        debug!(peer = %peer, "Zero-latency in-memory drop for short port scan");
+        let _ = timeout(MASK_TIMEOUT, writer.shutdown()).await;
+        return;
+    }
+
     // Connect via Unix socket or TCP
+
     #[cfg(unix)]
     if let Some(ref sock_path) = config.censorship.mask_unix_sock {
         let outcome_started = Instant::now();
