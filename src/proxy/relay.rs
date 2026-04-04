@@ -488,7 +488,7 @@ impl<W> ShapedWriter<W> {
 
 impl<W: AsyncWrite + Unpin> AsyncWrite for ShapedWriter<W> {
     fn poll_write(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
@@ -551,7 +551,7 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for ShapedWriter<W> {
         Poll::Ready(Ok(to_copy))
     }
 
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
         if this.buffer.is_empty() && !this.flushing {
             return Pin::new(&mut this.inner).poll_flush(cx);
@@ -603,7 +603,7 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for ShapedWriter<W> {
         Poll::Pending
     }
 
-    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
         if !this.buffer.is_empty() && !this.flushing {
             this.flushing = true;
