@@ -492,9 +492,12 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for ShapedWriter<W> {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        if self.flushing {
-            while self.flush_offset < self.buffer.len() {
-                match Pin::new(&mut self.inner).poll_write(cx, &self.buffer[self.flush_offset..]) {
+        let this = self.get_mut();
+        if this.flushing {
+            while this.flush_offset < this.buffer.len() {
+                let offset = this.flush_offset;
+                let data = &this.buffer[offset..];
+                match Pin::new(&mut this.inner).poll_write(cx, data) {
                     Poll::Ready(Ok(0)) => {
                         return Poll::Ready(Err(io::Error::new(
                             io::ErrorKind::WriteZero,
@@ -502,44 +505,44 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for ShapedWriter<W> {
                         )));
                     }
                     Poll::Ready(Ok(n)) => {
-                        self.flush_offset += n;
+                        this.flush_offset += n;
                     }
                     Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
                     Poll::Pending => return Poll::Pending,
                 }
             }
-            self.buffer.clear();
-            self.flush_offset = 0;
-            self.flushing = false;
-            self.sleep_active = false;
+            this.buffer.clear();
+            this.flush_offset = 0;
+            this.flushing = false;
+            this.sleep_active = false;
         }
 
         if buf.is_empty() {
             return Poll::Ready(Ok(0));
         }
 
-        let space = self.burst_threshold.saturating_sub(self.buffer.len());
+        let space = this.burst_threshold.saturating_sub(this.buffer.len());
         if space == 0 {
-            self.flushing = true;
+            this.flushing = true;
             cx.waker().wake_by_ref();
             return Poll::Pending;
         }
 
         let to_copy = std::cmp::min(buf.len(), space);
-        self.buffer.extend_from_slice(&buf[..to_copy]);
+        this.buffer.extend_from_slice(&buf[..to_copy]);
 
-        if !self.sleep_active {
-            self.sleep.as_mut().reset(Instant::now() + Duration::from_millis(self.timeout_ms));
-            self.sleep_active = true;
+        if !this.sleep_active {
+            this.sleep.as_mut().reset(Instant::now() + Duration::from_millis(this.timeout_ms));
+            this.sleep_active = true;
         }
 
-        if self.buffer.len() >= self.burst_threshold {
-            self.flushing = true;
+        if this.buffer.len() >= this.burst_threshold {
+            this.flushing = true;
             cx.waker().wake_by_ref();
-        } else if self.sleep_active {
-            match self.sleep.as_mut().poll(cx) {
+        } else if this.sleep_active {
+            match this.sleep.as_mut().poll(cx) {
                 Poll::Ready(_) => {
-                    self.flushing = true;
+                    this.flushing = true;
                 }
                 Poll::Pending => {}
             }
@@ -549,30 +552,33 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for ShapedWriter<W> {
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        if self.buffer.is_empty() && !self.flushing {
-            return Pin::new(&mut self.inner).poll_flush(cx);
+        let this = self.get_mut();
+        if this.buffer.is_empty() && !this.flushing {
+            return Pin::new(&mut this.inner).poll_flush(cx);
         }
 
-        if !self.flushing {
-            if self.buffer.len() >= self.burst_threshold {
-                self.flushing = true;
-            } else if self.sleep_active {
-                match self.sleep.as_mut().poll(cx) {
+        if !this.flushing {
+            if this.buffer.len() >= this.burst_threshold {
+                this.flushing = true;
+            } else if this.sleep_active {
+                match this.sleep.as_mut().poll(cx) {
                     Poll::Ready(_) => {
-                        self.flushing = true;
+                        this.flushing = true;
                     }
                     Poll::Pending => {
                         return Poll::Pending;
                     }
                 }
             } else {
-                self.flushing = true;
+                this.flushing = true;
             }
         }
 
-        if self.flushing {
-            while self.flush_offset < self.buffer.len() {
-                match Pin::new(&mut self.inner).poll_write(cx, &self.buffer[self.flush_offset..]) {
+        if this.flushing {
+            while this.flush_offset < this.buffer.len() {
+                let offset = this.flush_offset;
+                let data = &this.buffer[offset..];
+                match Pin::new(&mut this.inner).poll_write(cx, data) {
                     Poll::Ready(Ok(0)) => {
                         return Poll::Ready(Err(io::Error::new(
                             io::ErrorKind::WriteZero,
@@ -580,31 +586,34 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for ShapedWriter<W> {
                         )));
                     }
                     Poll::Ready(Ok(n)) => {
-                        self.flush_offset += n;
+                        this.flush_offset += n;
                     }
                     Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
                     Poll::Pending => return Poll::Pending,
                 }
             }
-            self.buffer.clear();
-            self.flush_offset = 0;
-            self.flushing = false;
-            self.sleep_active = false;
+            this.buffer.clear();
+            this.flush_offset = 0;
+            this.flushing = false;
+            this.sleep_active = false;
 
-            return Pin::new(&mut self.inner).poll_flush(cx);
+            return Pin::new(&mut this.inner).poll_flush(cx);
         }
 
         Poll::Pending
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        if !self.buffer.is_empty() && !self.flushing {
-            self.flushing = true;
+        let this = self.get_mut();
+        if !this.buffer.is_empty() && !this.flushing {
+            this.flushing = true;
         }
 
-        if self.flushing {
-            while self.flush_offset < self.buffer.len() {
-                match Pin::new(&mut self.inner).poll_write(cx, &self.buffer[self.flush_offset..]) {
+        if this.flushing {
+            while this.flush_offset < this.buffer.len() {
+                let offset = this.flush_offset;
+                let data = &this.buffer[offset..];
+                match Pin::new(&mut this.inner).poll_write(cx, data) {
                     Poll::Ready(Ok(0)) => {
                         return Poll::Ready(Err(io::Error::new(
                             io::ErrorKind::WriteZero,
@@ -612,19 +621,19 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for ShapedWriter<W> {
                         )));
                     }
                     Poll::Ready(Ok(n)) => {
-                        self.flush_offset += n;
+                        this.flush_offset += n;
                     }
                     Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
                     Poll::Pending => return Poll::Pending,
                 }
             }
-            self.buffer.clear();
-            self.flush_offset = 0;
-            self.flushing = false;
-            self.sleep_active = false;
+            this.buffer.clear();
+            this.flush_offset = 0;
+            this.flushing = false;
+            this.sleep_active = false;
         }
 
-        Pin::new(&mut self.inner).poll_shutdown(cx)
+        Pin::new(&mut this.inner).poll_shutdown(cx)
     }
 }
 
