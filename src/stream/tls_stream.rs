@@ -39,7 +39,7 @@ use std::io::{self, Error, ErrorKind, Result};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
-use rand::Rng;
+use rand::{Rng, RngExt};
 
 use super::state::{HeaderBuffer, StreamState, WriteBuffer, YieldBuffer};
 use crate::protocol::constants::{
