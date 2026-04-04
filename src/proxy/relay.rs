@@ -61,7 +61,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 use rand::{Rng, RngExt};
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf, copy_bidirectional_with_sizes};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf, copy_bidirectional_with_sizes};
 use tokio::time::{Instant, Sleep, sleep_until};
 use tracing::{debug, trace, warn};
 
@@ -666,7 +666,12 @@ where
     // We accumulate up to 64KB or 150ms before flushing.
     let shaped_client_writer = ShapedWriter::new(client_writer, 65536, 150);
     let client_combined = CombinedStream::new(client_reader, shaped_client_writer);
-    let mut server = CombinedStream::new(server_reader, server_writer);
+    
+    // Hypothesis 8: Micro-Sessions. Limit server->client reads to 10-14 KB to force Telegram
+    // to cleanly tear down the connection and reconnect, avoiding DPI 16 KB freezing filters.
+    let session_byte_limit = rand::rng().random_range(10_000..=14_000);
+    let limited_server_reader = server_reader.take(session_byte_limit);
+    let mut server = CombinedStream::new(limited_server_reader, server_writer);
 
     // Wrap client with stats/activity tracking
     let mut client = StatsIo::new(
