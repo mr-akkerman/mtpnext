@@ -60,7 +60,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
-use rand::Rng;
+use rand::{Rng, RngExt};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf, copy_bidirectional_with_sizes};
 use tokio::time::{Instant, Sleep, sleep_until};
 use tracing::{debug, trace, warn};
