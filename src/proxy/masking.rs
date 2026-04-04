@@ -581,8 +581,8 @@ fn build_mask_proxy_header(
 
 /// Handle a bad client by forwarding to mask host
 pub async fn handle_bad_client<R, W>(
-    reader: R,
-    writer: W,
+    mut reader: R,
+    mut writer: W,
     initial_data: &[u8],
     peer: SocketAddr,
     local_addr: SocketAddr,
